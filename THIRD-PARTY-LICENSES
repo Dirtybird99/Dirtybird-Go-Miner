@@ -1,0 +1,30 @@
+Third-party code and licenses
+=============================
+
+This project is MIT-licensed (see LICENSE). It contains or builds on the
+following third-party work:
+
+1. DERO AstroBWTv3 reference implementation
+   - internal/astrobwt/pow.go, rc4.go and internal/refpow/ are ported from
+     derohe (github.com/deroproject/derohe, astrobwt/astrobwtv3), DERO
+     Foundation. See internal/astrobwt/LICENSE-DERO.txt for the DERO license
+     that covers the ported hash core.
+
+2. Go standard library (BSD-3-Clause)
+   - internal/astrobwt/sais.go and sais2.go derive from Go's
+     index/suffixarray SA-IS implementation.
+     Copyright (c) The Go Authors. https://go.dev/LICENSE
+
+3. v1.14 descriptor suffix array
+   - internal/astrobwt/sa_v114*.go is a pure-Go port of the structure-aware
+     suffix array from github.com/Dirtybird99/Dirtybird-Zig-Miner
+     (vendor/v114, MIT), itself derived from the dirtybird C++ miner.
+
+4. Go module dependencies (see go.mod; fetched at build time, not vendored)
+   - github.com/cespare/xxhash (MIT)
+   - github.com/dchest/siphash (CC0/Public domain)
+   - github.com/gorilla/websocket (BSD-2-Clause)
+   - github.com/klauspost/cpuid/v2 (MIT)
+   - github.com/minio/sha256-simd (Apache-2.0)
+   - github.com/segmentio/fasthash (MIT)
+   - golang.org/x/crypto, golang.org/x/sys (BSD-3-Clause)

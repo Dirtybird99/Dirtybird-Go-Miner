@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Gate
+        run: |
+          go vet ./...
+          go test ./...
+      - name: Build release assets
+        run: bash scripts/release.sh "${{ steps.ver.outputs.version }}"
+      - name: Smoke-test linux binary
+        run: |
+          tar -xzf "dist/Dirtybird-Go-Miner-amd64-${{ steps.ver.outputs.version }}.tar.gz" -C /tmp
+          /tmp/Dirtybird-Go-Miner-amd64-${{ steps.ver.outputs.version }}/go-miner --selftest
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.ver.outputs.version }}" \
+            --title "Dirtybird Go Miner ${{ steps.ver.outputs.version }}" \
+            --generate-notes \
+            dist/*.zip dist/*.tar.gz dist/SHA256SUMS.txt

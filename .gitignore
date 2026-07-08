@@ -1,0 +1,21 @@
+# build outputs
+go-miner
+go-miner.exe
+go-miner-*.exe
+gm_*.exe
+exe_*.exe
+*.test.exe
+astro*.test.exe
+dist/
+release/
+
+# profiles and logs (default.pgo is the committed PGO build input)
+*.pprof
+*.prof
+*.pgo
+!default.pgo
+*.log
+
+# local scratch
+sandbox/
+loop.run.yaml
