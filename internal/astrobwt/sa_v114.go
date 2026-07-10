@@ -29,9 +29,9 @@ var v114Fallbacks atomic.Uint64
 // V114Fallbacks reports the process-wide fallback count.
 func V114Fallbacks() uint64 { return v114Fallbacks.Load() }
 
-// stage5Run mirrors the C++ 8-byte descriptor record. key is ALREADY
-// radix-ordered (byte-swapped 24-bit). packed: count<<17 | arenaBegin, or a
-// literal position when the count bits are zero.
+// stage5Run mirrors the C++ 8-byte descriptor record. key is the native
+// little-endian 24-bit load. packed: count<<17 | arenaBegin, or a literal
+// position when the count bits are zero.
 type stage5Run struct {
 	key    uint32
 	packed uint32
@@ -110,10 +110,6 @@ func buildStage5Flags(markers []uint16, nTemplates, logicalLen uint32, flags []b
 type stage4View struct {
 	data       []byte
 	logicalLen uint32
-}
-
-func radixOrderKey(key uint32) uint32 {
-	return (key&0x0000ff)<<16 | (key & 0x00ff00) | (key&0xff0000)>>16
 }
 
 // buildSAv114 builds the suffix array of s.data[:logicalLen] into

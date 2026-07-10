@@ -72,9 +72,8 @@ func appendOrderGroup(v *v114Scratch, key uint32, order []uint32, first, count u
 	if count == 0 {
 		return false
 	}
-	orderedKey := radixOrderKey(key)
 	if count == 1 {
-		v.runs = append(v.runs, stage5Run{key: orderedKey, packed: order[first]})
+		v.runs = append(v.runs, stage5Run{key: key, packed: order[first]})
 		return true
 	}
 	begin := uint32(len(v.arena))
@@ -82,7 +81,7 @@ func appendOrderGroup(v *v114Scratch, key uint32, order []uint32, first, count u
 		return false
 	}
 	v.arena = append(v.arena, order[first:first+count]...)
-	v.runs = append(v.runs, stage5Run{key: orderedKey, packed: count<<17 + begin})
+	v.runs = append(v.runs, stage5Run{key: key, packed: count<<17 + begin})
 	return true
 }
 
@@ -96,7 +95,7 @@ func emitLiteralRecords(view *stage4View, start, count uint32, v *v114Scratch) b
 	for rel := uint32(0); rel < count; rel++ {
 		pos := start + rel
 		key := *(*uint32)(unsafe.Add(dp, pos)) & 0xffffff
-		runs = append(runs, stage5Run{key: radixOrderKey(key), packed: pos})
+		runs = append(runs, stage5Run{key: key, packed: pos})
 	}
 	v.runs = runs
 	return true
@@ -122,11 +121,11 @@ func emitFullGroupRunTwo(view *stage4View, startGroup uint32, v *v114Scratch) bo
 				return false
 			}
 			v.arena = append(v.arena, order[0], order[1])
-			v.runs = append(v.runs, stage5Run{key: radixOrderKey(key0), packed: 2<<17 + begin})
+			v.runs = append(v.runs, stage5Run{key: key0, packed: 2<<17 + begin})
 		} else {
 			v.runs = append(v.runs,
-				stage5Run{key: radixOrderKey(key0), packed: order[0]},
-				stage5Run{key: radixOrderKey(key1), packed: order[1]})
+				stage5Run{key: key0, packed: order[0]},
+				stage5Run{key: key1, packed: order[1]})
 		}
 		if rel > 0 {
 			order[0]--
@@ -186,7 +185,7 @@ func emitFullGroupRunGeneric(view *stage4View, startGroup, groupCount uint32, v 
 			}
 			if groupEnd == groupStart+1 {
 				// singleton fast path (most groups); avoids the call
-				v.runs = append(v.runs, stage5Run{key: radixOrderKey(key), packed: order[groupStart]})
+				v.runs = append(v.runs, stage5Run{key: key, packed: order[groupStart]})
 			} else if !appendOrderGroup(v, key, order, uint32(groupStart), uint32(groupEnd-groupStart)) {
 				return false
 			}
@@ -227,6 +226,7 @@ func emitFullGroupRun(view *stage4View, startGroup, endGroup uint32, v *v114Scra
 	if groupCount > stage4MaxGroupRun {
 		return false
 	}
+	v114StatsRecordGroup(groupCount)
 	if groupCount == 1 {
 		return emitLiteralRecords(view, startGroup<<8, 256, v)
 	}

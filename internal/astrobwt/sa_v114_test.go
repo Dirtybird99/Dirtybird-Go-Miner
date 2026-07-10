@@ -91,12 +91,18 @@ func TestV114ZeroAllocsAfterWarmup(t *testing.T) {
 	var work [48]byte
 	rand.Read(work[:])
 	h.Hash(work[:]) // warm the scratch growth paths
+	fallbacksBefore := V114Fallbacks()
 	allocs := testing.AllocsPerRun(100, func() {
 		work[0]++
 		_ = h.Hash(work[:])
 	})
 	if allocs != 0 {
 		t.Fatalf("v114 Hash allocates %v times per run, want 0", allocs)
+	}
+	// The SAIS fallback path may allocate (sais.go pathological-input tmp),
+	// which AllocsPerRun can't attribute; prove it never ran instead.
+	if fb := V114Fallbacks() - fallbacksBefore; fb != 0 {
+		t.Fatalf("%d SAIS fallbacks during the alloc gate — the 0-alloc result is unproven for v114", fb)
 	}
 }
 

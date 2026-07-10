@@ -1,5 +1,5 @@
-# Builds the release zip: packaging\build-release.ps1 -Version v0.1.0
-param([string]$Version = "v0.1.0")
+# Builds the release zip: packaging\build-release.ps1 -Version v0.1.1
+param([string]$Version = "v0.1.1")
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
@@ -30,15 +30,13 @@ Copy-Item (Join-Path $root "internal\astrobwt\LICENSE-DERO.txt") $stage
 if ($LASTEXITCODE -ne 0) { throw "selftest failed" }
 
 $zip = Join-Path $root "release\go-miner-$Version-windows-amd64.zip"
-Compress-Archive -Path $stage -DestinationPath $zip -Force
-
 $sums = Join-Path $root "release\SHA256SUMS.txt"
 Get-ChildItem $stage -File | ForEach-Object {
     "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
 } | Set-Content $sums
-"{0}  {1}" -f (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower(), (Split-Path $zip -Leaf) | Add-Content $sums
 Copy-Item $sums $stage
 
 Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+"{0}  {1}" -f (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower(), (Split-Path $zip -Leaf) | Add-Content $sums
 Write-Host "release ready: $zip"
 Get-Content $sums

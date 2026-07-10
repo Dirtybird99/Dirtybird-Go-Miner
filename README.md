@@ -62,9 +62,12 @@ interactively.
 | `--setup` | interactively write config.json, then exit |
 | `--selftest` | verify hash vectors and exit (0=PASS, 1=FAIL) |
 | `--bench` | offline AstroBWTv3 benchmark and exit |
+| `--statbench` | offline real-worker/status-line benchmark (`--secs N`) |
 | `-v`, `--version` | print version |
 
-Run `go-miner -h` for the advanced benchmarking/tuning flags.
+Run `go-miner -h` for the advanced benchmarking/tuning flags. Reproducible
+performance methodology and research notes live in [BENCHMARKING.md](BENCHMARKING.md)
+and [PERF_RESEARCH.md](PERF_RESEARCH.md).
 
 ## Build from source
 

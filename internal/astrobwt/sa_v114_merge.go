@@ -69,8 +69,9 @@ func suffixLessAfterKey(v *stage4View, a, b uint32) bool {
 	return a < b
 }
 
-// radixSortRunsByStoredKey: 3 LSB-first byte passes over the stored
-// (already radix-ordered) keys. Ping-pongs runs<->tmp, result lands in runs.
+// radixSortRunsByStoredKey sorts native little-endian 24-bit keys by running
+// stable passes from the lexical last byte to the first. Ping-pongs
+// runs<->tmp; the result lands in runs.
 func radixSortRunsByStoredKey(v *v114Scratch) {
 	runs := v.runs
 	n := len(runs)
@@ -88,14 +89,14 @@ func radixSortRunsByStoredKey(v *v114Scratch) {
 
 	var sum uint32
 	for i := 0; i < 256; i++ {
-		c := counts0[i]
-		counts0[i] = sum
+		c := counts2[i]
+		counts2[i] = sum
 		sum += c
 	}
 	for i := range runs {
 		r := runs[i]
-		tmp[counts0[r.key&0xff]] = r
-		counts0[r.key&0xff]++
+		tmp[counts2[(r.key>>16)&0xff]] = r
+		counts2[(r.key>>16)&0xff]++
 	}
 
 	sum = 0
@@ -112,14 +113,14 @@ func radixSortRunsByStoredKey(v *v114Scratch) {
 
 	sum = 0
 	for i := 0; i < 256; i++ {
-		c := counts2[i]
-		counts2[i] = sum
+		c := counts0[i]
+		counts0[i] = sum
 		sum += c
 	}
 	for i := range runs {
 		r := runs[i]
-		tmp[counts2[(r.key>>16)&0xff]] = r
-		counts2[(r.key>>16)&0xff]++
+		tmp[counts0[r.key&0xff]] = r
+		counts0[r.key&0xff]++
 	}
 	// result is in tmp: swap the buffers (runs keeps len n, radixTmp cap)
 	v.runs = tmp
@@ -148,6 +149,7 @@ func tryWriteLiteralGroup(view *stage4View, runs []stage5Run, sa []int32, outPos
 		}
 		positions[i] = runs[i].begin()
 	}
+	v114StatsRecordLiteralGroup(count)
 	for i := 1; i < count; i++ {
 		pos := positions[i]
 		j := i
@@ -169,6 +171,7 @@ func tryWriteTwoRuns(view *stage4View, arena []uint32, runs []stage5Run, sa []in
 	if len(runs) != 2 {
 		return outPos, false
 	}
+	v114StatsRecordTwoRunMerge()
 	left, right := runs[0], runs[1]
 	leftCount, rightCount := left.count(), right.count()
 	var leftRel, rightRel uint32
@@ -303,6 +306,7 @@ func writeFusedRunsToSA(view *stage4View, v *v114Scratch, sa []int32) bool {
 			if outPos, handled = tryWriteLiteralGroup(view, group, sa, outPos); !handled {
 				if outPos, handled = tryWriteTwoRuns(view, arena, group, sa, outPos); !handled {
 					// rare fallback: expand all positions and k-way merge
+					v114StatsRecordLargeFallbackMerge()
 					v.groupPos = v.groupPos[:0]
 					v.runLens = v.runLens[:0]
 					for i := range group {

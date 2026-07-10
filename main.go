@@ -38,6 +38,7 @@ type options struct {
 	saName, cpuProfile           string
 	threads, secs                int
 	bench, sustained, selftest   bool
+	statbench                    bool
 	dryRun, pin, high, debugFlag bool
 	pair                         bool
 	showVersion                  bool
@@ -50,6 +51,8 @@ func (o *options) backend() astrobwt.Backend {
 	}
 	return astrobwt.BackendV114
 }
+
+func validSAName(name string) bool { return name == "v114" || name == "sais" }
 
 func parseFlags() *options {
 	o := &options{}
@@ -64,6 +67,7 @@ func parseFlags() *options {
 	flag.StringVar(&o.cfgPath, "config-file", "", "")
 	flag.BoolVar(&o.bench, "bench", false, "")
 	flag.BoolVar(&o.sustained, "sustained", false, "")
+	flag.BoolVar(&o.statbench, "statbench", false, "")
 	flag.IntVar(&o.secs, "secs", 30, "")
 	flag.BoolVar(&o.selftest, "selftest", false, "")
 	flag.BoolVar(&o.setup, "setup", false, "")
@@ -101,6 +105,7 @@ func usage() {
 
 advanced (benchmarking/tuning):
   --sustained --secs N   fixed-window all-threads benchmark
+  --statbench --secs N    real-worker status-line stability benchmark
   --pin / --high         P-core-first thread pinning / HIGH process priority
   --pair                 2 nonces/thread with 2-way SHA-NI final hash
   --sa v114|sais         suffix-array backend (default v114)
@@ -148,6 +153,10 @@ func run() int {
 	if o.setup {
 		return runSetup(o)
 	}
+	if !validSAName(o.saName) {
+		fmt.Fprintf(os.Stderr, "unknown --sa backend %q (want v114 or sais)\n", o.saName)
+		return 1
+	}
 	cons := console.New()
 	if err := kat(); err != nil {
 		cons.Logf("ERROR", "pow(\"a\") self-test failed; refusing to mine.")
@@ -178,13 +187,16 @@ func run() int {
 		}
 	}
 
-	if o.bench || o.sustained {
+	if o.bench || o.sustained || o.statbench {
 		threads := o.threads
 		if threads <= 0 {
 			threads = runtime.NumCPU()
 		}
 		if o.bench {
 			return runBench(threads, o.pin, o.backend(), o.pair)
+		}
+		if o.statbench {
+			return runStatBench(cons, threads, o.secs, o)
 		}
 		return runSustained(threads, o.secs, o.pin, o.backend(), o.pair)
 	}
@@ -203,11 +215,6 @@ func run() int {
 		return 1
 	}
 	o.resolve(cfg)
-
-	if o.saName != "v114" && o.saName != "sais" {
-		fmt.Fprintf(os.Stderr, "unknown --sa backend %q (want v114 or sais)\n", o.saName)
-		return 1
-	}
 
 	// Startup banner: the family look (zig miner main.zig ordering).
 	cons.Logf("INFO", "Dirtybird Miner")
@@ -323,16 +330,49 @@ func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, cli
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 
-	var prevHashes uint64
+	// With SetGCPercent(-1) the collector only runs at the 2 GiB memory
+	// limit; the small steady allocation drip (job JSON, status strings,
+	// share hex) would ratchet RSS there over multi-day runs. An hourly
+	// forced GC keeps the footprint at tens of MB; the live set is ~20
+	// scratches, so the pause is immaterial.
+	gcTick := time.NewTicker(time.Hour)
+	defer gcTick.Stop()
+
+	// The displayed rate is a ~15s sliding window (real timestamps), not the
+	// raw 1s delta: per-thread counters flush in 16-hash chunks and tick
+	// spacing jitters, so a 1s window bounces several percent around a flat
+	// true rate. The ring starts filled with the start point, so the readout
+	// ramps as an avg-since-start until the window is full.
+	type ratePoint struct {
+		t time.Time
+		h uint64
+	}
+	const rateSlots = 16
+	var ring [rateSlots]ratePoint
+	for i := range ring {
+		ring[i] = ratePoint{t: start}
+	}
+	tickN := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-gcTick.C:
+			runtime.GC()
+			continue
 		case <-tick.C:
 		}
 		cur := st.TotalHashes.Load()
-		rate := float64(cur-prevHashes) / 1000 // KH/s over the 1s window
-		prevHashes = cur
+		now := time.Now()
+		slot := tickN % rateSlots
+		old := ring[slot] // the sample rateSlots ticks ago
+		ring[slot] = ratePoint{t: now, h: cur}
+		tickN++
+		dt := now.Sub(old.t).Seconds()
+		if dt <= 0 {
+			dt = 1
+		}
+		rate := float64(cur-old.h) / dt / 1000 // KH/s over the window
 		elapsed := time.Since(start)
 		avg := float64(cur) / elapsed.Seconds() / 1000
 		up := int(elapsed.Seconds())

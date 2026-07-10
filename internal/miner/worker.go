@@ -12,7 +12,7 @@ import (
 	"go-miner/internal/getwork"
 )
 
-const counterFlush = 64 // hashes between shared-counter flushes
+const counterFlush = 16 // hashes between shared-counter flushes
 
 // Run is one mining worker. It locks its OS thread, optionally pins it, and
 // grinds nonces on the current job until the epoch changes or ctx ends.

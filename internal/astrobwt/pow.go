@@ -98,6 +98,18 @@ func astroBWTv3Stream(input []byte, scratch *ScratchData) (data_len uint32) {
 
 		_ = step_3[pos1:pos2] // bounds check elimination
 
+		// Single-byte ops collapse to one table load each; the rest fall through
+		// to the switch. Constant-folded away when useLUT is false.
+		if useLUT {
+			if row := opRow[op]; row >= 0 {
+				t := &opLUT[row]
+				for i := pos1; i < pos2; i++ {
+					step_3[i] = t[step_3[i]]
+				}
+				goto opsDone
+			}
+		}
+
 		switch op {
 
 		case 0:
@@ -2407,6 +2419,8 @@ func astroBWTv3Stream(input []byte, scratch *ScratchData) (data_len uint32) {
 		default:
 
 		}
+
+	opsDone:
 
 		if step_3[pos1]-step_3[pos2] < 0x10 { // 6.25 % probability
 			prev_lhash = lhash + prev_lhash

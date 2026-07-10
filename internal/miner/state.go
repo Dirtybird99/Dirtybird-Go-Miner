@@ -16,6 +16,7 @@ var (
 	ErrBadBlob    = errors.New("blockhashing_blob is not 48 bytes")
 	ErrBadVersion = errors.New("unsupported miniblock version, check for a miner update")
 	ErrBadDiff    = errors.New("job difficulty is zero")
+	ErrBadJobID   = errors.New("jobid is empty")
 )
 
 // State is the shared job snapshot plus counters (the zig miner's state.zig
@@ -44,16 +45,13 @@ type State struct {
 // SetJob validates and installs a pushed job. It always mirrors the daemon
 // counters; it bumps the epoch only when the work itself changed.
 func (s *State) SetJob(j getwork.Job) (changed bool, err error) {
-	s.Height.Store(j.Height)
-	s.Diff.Store(j.Difficultyuint64)
-	s.Blocks.Store(j.Blocks)
-	s.MiniBlocks.Store(j.MiniBlocks)
-	s.Rejected.Store(j.Rejected)
-
 	var blob [MiniblockSize]byte
 	n, err := hex.Decode(blob[:], []byte(j.Blockhashing_blob))
 	if err != nil || n != MiniblockSize || len(j.Blockhashing_blob) != MiniblockSize*2 {
 		return false, ErrBadBlob
+	}
+	if j.JobID == "" {
+		return false, ErrBadJobID
 	}
 	if blob[0]&0xf != 1 { // derohe miner.go version-nibble check
 		return false, ErrBadVersion
@@ -61,17 +59,24 @@ func (s *State) SetJob(j getwork.Job) (changed bool, err error) {
 	if j.Difficultyuint64 == 0 {
 		return false, ErrBadDiff
 	}
+	target := ComputeTarget(j.Difficultyuint64)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if blob == s.blob && j.JobID == s.jobid {
-		return false, nil
+	changed = blob != s.blob || j.JobID != s.jobid || target != s.target
+	if changed {
+		s.blob = blob
+		s.jobid = j.JobID
+		s.target = target
+		s.epoch.Add(1)
 	}
-	s.blob = blob
-	s.jobid = j.JobID
-	s.target = ComputeTarget(j.Difficultyuint64)
-	s.epoch.Add(1)
-	return true, nil
+	s.mu.Unlock()
+
+	s.Height.Store(j.Height)
+	s.Diff.Store(j.Difficultyuint64)
+	s.Blocks.Store(j.Blocks)
+	s.MiniBlocks.Store(j.MiniBlocks)
+	s.Rejected.Store(j.Rejected)
+	return changed, nil
 }
 
 // Job returns a consistent snapshot of the current work.

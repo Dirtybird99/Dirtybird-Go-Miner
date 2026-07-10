@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the full release asset set into dist/ (family layout, same asset
-# names as the Zig miner): usage  scripts/release.sh v0.1.0
+# names as the Zig miner): usage  scripts/release.sh v0.1.1
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

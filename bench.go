@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"go-miner/internal/astrobwt"
+	"go-miner/internal/console"
+	"go-miner/internal/getwork"
 	"go-miner/internal/miner"
 )
 
@@ -82,8 +87,13 @@ func runBench(maxThreads int, pin bool, backend astrobwt.Backend, pair bool) int
 		fmt.Printf("%8d %12.1f %14.1f %14s\n", tc, hs, hs/float64(tc),
 			time.Duration(float64(window)/float64(n)*float64(tc)).Round(time.Microsecond))
 	}
-	printStageStats()
+	printInstrumentationStats()
 	return 0
+}
+
+func printInstrumentationStats() {
+	printStageStats()
+	astrobwt.PrintV114Stats(os.Stdout)
 }
 
 // printStageStats prints the per-stage cycle table when the binary was built
@@ -122,7 +132,43 @@ func runSustained(threads, secs int, pin bool, backend astrobwt.Backend, pair bo
 	n := hashFor(threads, window, pinOrder, backend, pair)
 	hs := float64(n) / window.Seconds()
 	fmt.Printf("%d hashes in %v = %.2f KH/s (%.1f H/s/thread)\n", n, window, hs/1000, hs/float64(threads))
-	printStageStats()
+	printInstrumentationStats()
+	return 0
+}
+
+// runStatBench drives the real mining pipeline — miner.Run workers plus the
+// 1 Hz statusLoop — on a synthetic never-winning job for a fixed window, so
+// the displayed rate can be captured offline (GOMINER_FORCE_STATUS=1) and its
+// stability measured. No daemon involved; nothing is ever submitted.
+func runStatBench(cons *console.Console, threads, secs int, o *options) int {
+	st := &miner.State{}
+	blob := make([]byte, miner.MiniblockSize)
+	blob[0] = 0x01 // version nibble the job gate expects
+	if _, err := st.SetJob(getwork.Job{
+		JobID:             "statbench",
+		Blockhashing_blob: hex.EncodeToString(blob),
+		Difficultyuint64:  1 << 62, // target no hash will ever meet
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	var pinOrder []int
+	if o.pin {
+		pinOrder = miner.PinOrder()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*time.Second)
+	defer cancel()
+	submits := make(chan getwork.Submit, 16)
+	for t := 0; t < threads; t++ {
+		go miner.Run(ctx, t, st, submits, pinOrder, o.backend(), o.pair)
+	}
+	start := time.Now()
+	statusLoop(ctx, cons, st, &getwork.Client{}, o)
+	elapsed := time.Since(start)
+	time.Sleep(200 * time.Millisecond) // let workers flush their local counters
+	n := st.TotalHashes.Load()
+	fmt.Fprintf(os.Stderr, "\nstatbench: %d hashes in %.2fs = %.3f KH/s true\n",
+		n, elapsed.Seconds(), float64(n)/elapsed.Seconds()/1000)
 	return 0
 }
 
