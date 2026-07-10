@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the full release asset set into dist/ (family layout, same asset
-# names as the Zig miner): usage  scripts/release.sh v0.1.1
+# names as the Zig miner): usage  scripts/release.sh v0.1.2
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -34,19 +34,32 @@ matrix | while read -r plat goos goarch amd64 suffix launcher; do
   if [ "$goos" = "windows" ]; then
     (cd dist && zip -qr "${NAME}-${plat}-${VERSION}.zip" "${NAME}-${plat}-${VERSION}")
   else
+    chmod 0755 "${stage}/go-miner" "${stage}/${launcher}"
     tar -czf "dist/${NAME}-${plat}-${VERSION}.tar.gz" -C dist "${NAME}-${plat}-${VERSION}"
   fi
   rm -rf "$stage"
 done
 
-# HiveOS / MMPOS custom-miner package (linux amd64 binary + h-scripts)
-hstage="dist/go-miner"
+# HiveOS / MMPOS custom-miner package (linux amd64 binary + h-scripts).
+# Hive derives the install directory from the archive name, so these must match.
+HIVE_NAME="dirtybird-go-miner"
+hasset="${HIVE_NAME}-${VERSION}.hiveos_mmpos.amd64.tar.gz"
+hbase="${hasset%.tar.gz}"
+hversion="${hbase##*-}"
+hminer="${hbase%-$hversion}"
+[ "$hminer" = "$HIVE_NAME" ] || {
+  echo "Hive archive name resolves to '$hminer', expected '$HIVE_NAME'" >&2
+  exit 1
+}
+
+hstage="dist/${HIVE_NAME}"
 mkdir -p "$hstage"
 env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
     go build $PGO -trimpath -ldflags "$LDFLAGS" -o "${hstage}/go-miner" .
 cp config/h-manifest.conf config/h-config.sh config/h-run.sh config/h-stats.sh "$hstage/"
 sed -i "s/^CUSTOM_VERSION=.*/CUSTOM_VERSION=${VERSION#v}/" "${hstage}/h-manifest.conf"
-tar -czf "dist/dirtybird-go-miner-${VERSION}.hiveos_mmpos.amd64.tar.gz" -C dist go-miner
+chmod 0755 "${hstage}/go-miner" "${hstage}"/h-*.sh
+tar -czf "dist/${hasset}" -C dist "$HIVE_NAME"
 rm -rf "$hstage"
 
 (cd dist && sha256sum ./*.zip ./*.tar.gz | sed 's|\./||' > SHA256SUMS.txt)

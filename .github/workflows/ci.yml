@@ -29,3 +29,21 @@ jobs:
         run: |
           go build -pgo=default.pgo -trimpath -o go-miner-ci .
           ./go-miner-ci --selftest
+      - name: Package smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bash scripts/release.sh v0.0.0
+          asset=dist/dirtybird-go-miner-v0.0.0.hiveos_mmpos.amd64.tar.gz
+          base=$(basename "$asset" .tar.gz)
+          version=${base##*-}
+          miner=${base%-$version}
+          test "$miner" = dirtybird-go-miner
+          test "$(tar -xOf "$asset" "$miner/h-manifest.conf" | grep '^CUSTOM_NAME=')" = "CUSTOM_NAME=$miner"
+          for script in h-config.sh h-run.sh h-stats.sh; do
+            mode=$(tar -tvf "$asset" "$miner/$script" | awk '{print $1}')
+            case "$mode" in
+              -rwx*) ;;
+              *) echo "$script is not executable in $asset" >&2; exit 1 ;;
+            esac
+          done

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. /hive/miners/custom/go-miner/h-manifest.conf
+. /hive/miners/custom/dirtybird-go-miner/h-manifest.conf
 
 # go-miner has no HTTP stats API; it prints the family status line to the log
 # via carriage-return (\r) updates in the form (ANSI-colored):

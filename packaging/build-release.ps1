@@ -1,5 +1,5 @@
-# Builds the release zip: packaging\build-release.ps1 -Version v0.1.1
-param([string]$Version = "v0.1.1")
+# Builds the release zip: packaging\build-release.ps1 -Version v0.1.2
+param([string]$Version = "v0.1.2")
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
