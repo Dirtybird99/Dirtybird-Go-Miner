@@ -200,7 +200,7 @@ function Get-Median {
         return 0.0
     }
     $sorted = @($Values | Sort-Object)
-    $mid = [int]($sorted.Count / 2)
+    $mid = [int][math]::Floor($sorted.Count / 2.0)
     if (($sorted.Count % 2) -eq 1) {
         return [double]$sorted[$mid]
     }
@@ -262,7 +262,7 @@ foreach ($t in $pairCandidates) {
 Add-Run $runs "sais-baseline" 1 "sais" $false $false $false
 
 if ($IncludeOvercommit) {
-    foreach ($t in @($logicalCPUs + 2, $logicalCPUs + 4)) {
+    foreach ($t in @(($logicalCPUs + 2), ($logicalCPUs + 4))) {
         if ($t -le 255) {
             Add-Run $runs "v114-overcommit-pin-high" $t "v114" $true $true $false
         }
@@ -332,6 +332,8 @@ for ($rep = 1; $rep -le $Repeat; $rep++) {
         if (-not $match.Success) {
             throw "could not parse benchmark output for $($run.Name) at $($run.Threads) threads"
         }
+        $hashes = [uint64]$match.Groups["hashes"].Value
+        $hashRate = [double]$hashes / [double]$Secs
 
         $rows.Add([pscustomobject]@{
             timestamp   = (Get-Date).ToString("o")
@@ -344,9 +346,9 @@ for ($rep = 1; $rep -le $Repeat; $rep++) {
             high        = $run.High
             pair        = $run.Pair
             seconds     = $Secs
-            hashes      = [uint64]$match.Groups["hashes"].Value
-            khs         = [double]$match.Groups["khs"].Value
-            perThreadHs = [double]$match.Groups["per"].Value
+            hashes      = $hashes
+            khs         = $hashRate / 1000.0
+            perThreadHs = $hashRate / [double]$run.Threads
             command     = $binPath + " " + ($args -join " ")
         })
     }

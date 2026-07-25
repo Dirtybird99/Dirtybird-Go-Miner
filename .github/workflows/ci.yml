@@ -22,6 +22,43 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Benchmark matrix smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = "Stop"
+          $out = Join-Path $env:RUNNER_TEMP "bench-matrix"
+          ./scripts/bench-matrix.ps1 -Secs 1 -Repeat 3 -Threads 1 -IncludeOvercommit -OutDir $out -Candidate ci-smoke
+          $run = Get-ChildItem -LiteralPath $out -Directory |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          $rows = @(Import-Csv -LiteralPath (Join-Path $run.FullName "results.csv"))
+          $aggregate = @(Import-Csv -LiteralPath (Join-Path $run.FullName "aggregate.csv"))
+          if (-not ($rows.variant -contains "v114-overcommit-pin-high")) {
+            throw "overcommit rows were not generated"
+          }
+          foreach ($row in $rows) {
+            $expectedKhs = [double]$row.hashes / [double]$row.seconds / 1000.0
+            $expectedPerThread = [double]$row.hashes / [double]$row.seconds / [double]$row.threads
+            if ([math]::Abs([double]$row.khs - $expectedKhs) -gt 1e-9) {
+              throw "inexact KH/s for $($row.variant) at $($row.threads) threads"
+            }
+            if ([math]::Abs([double]$row.perThreadHs - $expectedPerThread) -gt 1e-6) {
+              throw "inexact per-thread H/s for $($row.variant) at $($row.threads) threads"
+            }
+          }
+          foreach ($group in @($rows | Group-Object variant, threads)) {
+            $sample = $group.Group[0]
+            $sorted = @($group.Group | ForEach-Object { [double]$_.khs } | Sort-Object)
+            $expected = $sorted[[int][math]::Floor($sorted.Count / 2.0)]
+            $actual = @($aggregate | Where-Object {
+              $_.variant -eq $sample.variant -and [int]$_.threads -eq [int]$sample.threads
+            })
+            if ($actual.Count -ne 1 -or [math]::Abs([double]$actual[0].medianKhs - $expected) -gt 1e-9) {
+              throw "wrong median for $($sample.variant) at $($sample.threads) threads"
+            }
+          }
       - name: LUT differential
         if: matrix.os == 'ubuntu-latest'
         run: go test -tags lut ./internal/astrobwt -run '^TestLUTDifferentialVsReference$' -count=1
