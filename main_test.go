@@ -127,8 +127,8 @@ func TestFormatStatusLineWidths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := formatStatusLine(fields, true, tt.width)
 			plain := stripStatusANSI(got)
-			if len(plain) > tt.width {
-				t.Fatalf("visible width %d exceeds %d: %q", len(plain), tt.width, got)
+			if tt.width > 1 && len(plain) >= tt.width {
+				t.Fatalf("visible width %d reaches terminal width %d: %q", len(plain), tt.width, got)
 			}
 			if !strings.Contains(plain, tt.contains) {
 				t.Fatalf("%q does not contain %q", plain, tt.contains)
@@ -143,7 +143,7 @@ func TestFormatStatusLineWidths(t *testing.T) {
 	}
 
 	got := formatStatusLine(fields, true, 8)
-	if got != "23.76 KH" || strings.Contains(got, "\x1b") {
+	if got != "23.76 K" || strings.Contains(got, "\x1b") {
 		t.Fatalf("narrow status = %q, want safe uncolored clip", got)
 	}
 	if got := formatStatusLine(fields, false, 0); !strings.Contains(got, "funnel submitted:2000") {

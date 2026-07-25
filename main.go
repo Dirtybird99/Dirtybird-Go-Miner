@@ -427,11 +427,15 @@ func statusLayouts(s statusFields, color bool) (full, compact, minimal string) {
 	return full, compact, minimal
 }
 
-// formatStatusLine keeps redirected records complete (width <= 0), while an
-// interactive terminal gets the richest layout that fits. If even the
-// minimal layout is too wide, return a clipped uncolored record so ANSI
-// sequences can never be cut in half.
-func formatStatusLine(s statusFields, color bool, width int) string {
+// formatStatusLine keeps redirected records complete (columns <= 0), while an
+// interactive terminal gets the richest layout that fits without using its
+// final column. If even the minimal layout is too wide, return a clipped
+// uncolored record so ANSI sequences can never be cut in half.
+func formatStatusLine(s statusFields, color bool, columns int) string {
+	width := columns
+	if width > 1 {
+		width--
+	}
 	plainFull, plainCompact, plainMinimal := statusLayouts(s, false)
 	full, compact, minimal := plainFull, plainCompact, plainMinimal
 	if color {
