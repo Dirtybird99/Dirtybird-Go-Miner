@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-. /hive/miners/custom/dirtybird-go-miner/h-manifest.conf
+. "${HIVE_MANIFEST:-/hive/miners/custom/dirtybird-go-miner/h-manifest.conf}"
 
-# go-miner has no HTTP stats API; it prints the family status line to the log
-# via carriage-return (\r) updates in the form (ANSI-colored):
+# go-miner has no HTTP stats API; Hive forces the family status line into the
+# log as a plain newline record. The parser also tolerates older CR/ANSI logs:
 #   [DIRTYBIRD] X.XX KH/s (Y.YY KH/s avg) | Height:N | Miniblocks:N | Blocks:N | REJ:N | Diff:NK | HH:MM:SS
 # We read the tail of the log, turn the \r-overwritten line into newlines,
 # strip ANSI, and scrape the freshest values for the dashboard.
@@ -20,7 +20,7 @@ if [[ -f $LOG ]]; then
         khs=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+ KH/s' | head -n1 | grep -oE '[0-9]+\.[0-9]+')
         acc=$(echo "$line" | grep -oE 'Miniblocks:[0-9]+' | grep -oE '[0-9]+')
         rej=$(echo "$line" | grep -oE 'REJ:[0-9]+' | grep -oE '[0-9]+')
-        hms=$(echo "$line" | grep -oE '[0-9]{2,}:[0-9]{2}:[0-9]{2}$')
+        hms=$(echo "$line" | grep -oE '[0-9]{2,}:[0-9]{2}:[0-9]{2}' | tail -n1)
         if [[ -n $hms ]]; then
             h=${hms%%:*}; rest=${hms#*:}; m=${rest%%:*}; s=${rest#*:}
             uptime=$(( 10#$h * 3600 + 10#$m * 60 + 10#$s ))

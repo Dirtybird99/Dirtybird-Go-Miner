@@ -3,46 +3,109 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (e.g. v0.1.2)"
-        required: true
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          go-version: "1.26.x"
-      - name: Resolve version
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.5"
+
+      - name: Verify signed release tag
         id: ver
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Gate
-        run: |
-          go vet ./...
-          go test ./...
-      - name: Build release assets
-        run: bash scripts/release.sh "${{ steps.ver.outputs.version }}"
-      - name: Smoke-test linux binary
-        run: |
-          tar -xzf "dist/Dirtybird-Go-Miner-amd64-${{ steps.ver.outputs.version }}.tar.gz" -C /tmp
-          /tmp/Dirtybird-Go-Miner-amd64-${{ steps.ver.outputs.version }}/go-miner --selftest
-      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.ver.outputs.version }}" \
-            --title "Dirtybird Go Miner ${{ steps.ver.outputs.version }}" \
-            --generate-notes \
-            dist/*.zip dist/*.tar.gz dist/SHA256SUMS.txt
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "tag must match vX.Y.Z: $tag" >&2
+            exit 1
+          }
+          tag_type=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.type')
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha')
+          [ "$tag_type" = tag ] || {
+            echo "$tag is not an annotated tag" >&2
+            exit 1
+          }
+          verified=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha" --jq '.verification.verified')
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha" --jq '.object.sha')
+          [ "$verified" = true ] || {
+            echo "$tag does not have a verified signature" >&2
+            exit 1
+          }
+          [ "$commit" = "$(git rev-parse HEAD)" ] || {
+            echo "checked-out commit does not match $tag" >&2
+            exit 1
+          }
+          [ "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            --jq '.enabled')" = true ] || {
+            echo "immutable releases must be enabled before tagging" >&2
+            exit 1
+          }
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $tag already exists" >&2
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Gate
+        run: |
+          go vet -mod=readonly ./...
+          go test -mod=readonly ./...
+          go test -mod=readonly -race -count=1 -timeout=30m ./internal/...
+          bash config/test-h-stats.sh
+
+      - name: Build release assets
+        run: bash scripts/release.sh "${{ steps.ver.outputs.version }}"
+
+      - name: Smoke-test linux binary
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.version }}"
+          cd dist
+          sha256sum -c SHA256SUMS.txt
+          mkdir "$RUNNER_TEMP/go-miner-smoke"
+          tar -xzf "Dirtybird-Go-Miner-amd64-$tag.tar.gz" -C "$RUNNER_TEMP/go-miner-smoke"
+          bin="$RUNNER_TEMP/go-miner-smoke/Dirtybird-Go-Miner-amd64-$tag/go-miner"
+          [ "$("$bin" --version)" = "go-miner $tag" ]
+          "$bin" --selftest
+          manifest=$(tar -xOf "dirtybird-go-miner-$tag.hiveos_mmpos.amd64.tar.gz" \
+            dirtybird-go-miner/h-manifest.conf)
+          grep -qx "CUSTOM_VERSION=${tag#v}" <<<"$manifest"
+
+      - name: Publish immutable-ready release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.version }}"
+          assets=(dist/*.zip dist/*.tar.gz dist/SHA256SUMS.txt)
+          gh release create "$tag" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Dirtybird Go Miner $tag" --generate-notes
+          test "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json isImmutable --jq '.isImmutable')" = true
+          for attempt in 1 2 3; do
+            ok=true
+            gh release verify "$tag" --repo "$GITHUB_REPOSITORY" || ok=false
+            for asset in "${assets[@]}"; do
+              gh release verify-asset "$tag" "$asset" \
+                --repo "$GITHUB_REPOSITORY" || ok=false
+            done
+            $ok && exit 0
+            sleep 5
+          done
+          exit 1
