@@ -2470,10 +2470,10 @@ func astroBWTv3Stream(input []byte, scratch *ScratchData) (data_len uint32) {
 	data_len = uint32((tries-4)*256 + (uint64(step_3[253])<<8|uint64(step_3[254]))&0x3ff) // ensure wide  number of variants exists
 
 	if !scratch.useV114 {
-		text_32_0alloc(scratch.data[:data_len], scratch.sa[:data_len])
+		text_32_0alloc(scratch.data[:data_len], scratch.sa[:data_len], scratch.saisTmp[:])
 	} else if !buildSAv114(scratch, data_len) {
 		v114Fallbacks.Add(1)
-		text_32_0alloc(scratch.data[:data_len], scratch.sa[:data_len])
+		text_32_0alloc(scratch.data[:data_len], scratch.sa[:data_len], scratch.saisTmp[:])
 	}
 	stageLap(stageSA, ts)
 

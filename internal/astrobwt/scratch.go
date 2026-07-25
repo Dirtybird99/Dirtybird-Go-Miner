@@ -16,6 +16,7 @@ type ScratchData struct {
 	data     [MAX_LENGTH + 64]uint8
 	sa       [MAX_LENGTH]int32
 	sa_bytes *[(MAX_LENGTH) * 4]uint8
+	saisTmp  [2 * 256]int32
 
 	// v114 descriptor-SA state: template markers recorded by the wolf loop
 	// (free bookkeeping) and the lazily-allocated stage-4/5 buffers.
@@ -32,13 +33,12 @@ func NewScratchData() *ScratchData {
 	return d
 }
 
-func text_32_0alloc(text []byte, sa []int32) {
+func text_32_0alloc(text []byte, sa, tmp []int32) {
 	if int(int32(len(text))) != len(text) || len(text) != len(sa) {
 		panic("suffixarray: misuse of text_32")
 	}
 	for i := range sa {
 		sa[i] = 0
 	}
-	var memory [2 * 256]int32
-	sais_8_32(text, 256, sa, memory[:])
+	sais_8_32(text, 256, sa, tmp)
 }
