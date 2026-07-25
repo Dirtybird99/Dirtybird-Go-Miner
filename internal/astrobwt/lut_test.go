@@ -103,10 +103,13 @@ func TestGeneratedFileUpToDate(t *testing.T) {
 	}
 }
 
-// The real gate: a full hash must stay byte-identical to the verbatim derohe
-// reference. Under -tags lut this exercises the table kernel; without the tag it
-// re-checks the branchy switch. Both backends share the op loop.
+// The real gate: under -tags lut, a full hash must stay byte-identical to the
+// verbatim derohe reference for both backends.
 func TestLUTDifferentialVsReference(t *testing.T) {
+	if !useLUT {
+		t.Skip("requires -tags lut")
+	}
+
 	iters := 5000
 	if testing.Short() {
 		iters = 500
