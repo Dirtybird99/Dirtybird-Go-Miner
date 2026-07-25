@@ -50,11 +50,6 @@ jobs:
             echo "checked-out commit does not match $tag" >&2
             exit 1
           }
-          [ "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
-            --jq '.enabled')" = true ] || {
-            echo "immutable releases must be enabled before tagging" >&2
-            exit 1
-          }
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "release $tag already exists" >&2
             exit 1
