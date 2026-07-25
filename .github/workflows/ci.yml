@@ -22,6 +22,9 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: LUT differential
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -tags lut ./internal/astrobwt -run '^TestLUTDifferentialVsReference$' -count=1
       - name: Race
         run: go test -race -count=1 -timeout=30m ./internal/...
       - name: Build + selftest
