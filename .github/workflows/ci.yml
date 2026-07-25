@@ -27,6 +27,16 @@ jobs:
         run: go test -tags lut ./internal/astrobwt -run '^TestLUTDifferentialVsReference$' -count=1
       - name: Race
         run: go test -race -count=1 -timeout=30m ./internal/...
+      - name: Shell hygiene
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          while IFS= read -r script; do
+            bash -n "$script"
+          done < <(git ls-files '*.sh')
+          git ls-files -z '*.sh' | xargs -0 shellcheck --severity=error
       - name: Build + selftest
         shell: bash
         run: |

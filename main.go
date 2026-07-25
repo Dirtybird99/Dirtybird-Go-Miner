@@ -8,6 +8,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -32,6 +34,15 @@ const (
 	defaultWallet = "dero1qyvuemd6z0uzsx5ufc99f0jhyzvvpysmrd2t3526ht7a9dfh7jve2qqt0vu5y"
 	maxThreads    = 255 // thread id lives in nonce byte 47
 )
+
+var setupEndpoints = []struct {
+	name, address string
+}{
+	{"Community Pools", defaultDaemon},
+	{"Rabid Mining", "dero.rabidmining.com:10300"},
+	{"dero-node.net solo", "dero-node.net:10100"},
+	{"DERO Foundation solo/full-block", "node.derofoundation.org:10100"},
+}
 
 type options struct {
 	daemon, wallet, cfgPath      string
@@ -379,7 +390,7 @@ type statusFields struct {
 	submitted, stale, sendFails          uint64
 }
 
-func formatStatusLine(s statusFields, color bool) string {
+func statusLayouts(s statusFields, color bool) (full, compact, minimal string) {
 	reset, yellow, brightGreen, brightWhite := "", "", "", ""
 	green, blue, cyan, magenta, white, brightRed := "", "", "", "", "", ""
 	if color {
@@ -391,7 +402,7 @@ func formatStatusLine(s statusFields, color bool) string {
 		rejectedColor = brightRed
 	}
 	seconds := int(s.uptime.Seconds())
-	line := fmt.Sprintf(yellow+"[DIRTYBIRD] "+
+	full = fmt.Sprintf(yellow+"[DIRTYBIRD] "+
 		brightGreen+"%.2f KH/s"+brightWhite+" ("+green+"%.2f KH/s avg"+brightWhite+")"+
 		" | "+blue+"Height:%d"+brightWhite+
 		" | "+cyan+"Miniblocks:%d"+brightWhite+
@@ -402,10 +413,44 @@ func formatStatusLine(s statusFields, color bool) string {
 		s.rate, s.average, s.height, s.miniblocks, s.blocks, s.rejected,
 		s.diff, seconds/3600, seconds/60%60, seconds%60)
 	if s.verbose {
-		line += fmt.Sprintf(" | funnel submitted:%d acc:%d rej:%d stale:%d sendfail:%d",
+		full += fmt.Sprintf(" | funnel submitted:%d acc:%d rej:%d stale:%d sendfail:%d",
 			s.submitted, s.miniblocks, s.rejected, s.stale, s.sendFails)
 	}
-	return line
+	compact = fmt.Sprintf(yellow+"[DIRTYBIRD] "+brightGreen+"%.2f KH/s"+brightWhite+
+		" H:"+blue+"%d"+brightWhite+
+		" M:"+cyan+"%d"+brightWhite+
+		" B:"+green+"%d"+brightWhite+
+		" R:"+rejectedColor+"%d"+reset,
+		s.rate, s.height, s.miniblocks, s.blocks, s.rejected)
+	minimal = fmt.Sprintf(brightGreen+"%.2f KH/s"+brightWhite+" H:"+blue+"%d"+reset,
+		s.rate, s.height)
+	return full, compact, minimal
+}
+
+// formatStatusLine keeps redirected records complete (columns <= 0), while an
+// interactive terminal gets the richest layout that fits without using its
+// final column. If even the minimal layout is too wide, return a clipped
+// uncolored record so ANSI sequences can never be cut in half.
+func formatStatusLine(s statusFields, color bool, columns int) string {
+	width := columns
+	if width > 1 {
+		width--
+	}
+	plainFull, plainCompact, plainMinimal := statusLayouts(s, false)
+	full, compact, minimal := plainFull, plainCompact, plainMinimal
+	if color {
+		full, compact, minimal = statusLayouts(s, true)
+	}
+	switch {
+	case width <= 0 || len(plainFull) <= width:
+		return full
+	case len(plainCompact) <= width:
+		return compact
+	case len(plainMinimal) <= width:
+		return minimal
+	default:
+		return plainMinimal[:width]
+	}
 }
 
 // statusLoop renders the family status line at 1 Hz until ctx ends:
@@ -460,7 +505,10 @@ func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, cli
 			stale:      st.Stale.Load(),
 			sendFails:  client.SendFails.Load(),
 		}
-		cons.Status(formatStatusLine(fields, true), formatStatusLine(fields, false))
+		cons.Status(
+			formatStatusLine(fields, true, cons.TerminalWidth()),
+			formatStatusLine(fields, false, 0),
+		)
 	}
 }
 
@@ -502,15 +550,105 @@ func yesNo(b bool) string {
 	return "No"
 }
 
+func validHostname(host string) bool {
+	if len(host) == 0 || len(host) > 253 {
+		return false
+	}
+	host = strings.TrimSuffix(host, ".")
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') &&
+				(c < '0' || c > '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validEndpoint(endpoint string) bool {
+	if endpoint == "" || endpoint != strings.TrimSpace(endpoint) {
+		return false
+	}
+	for _, c := range endpoint {
+		if c <= ' ' || c == 0x7f || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	address := endpoint
+	if i := strings.Index(address, "://"); i >= 0 {
+		if address[:i] != "ws" && address[:i] != "wss" {
+			return false
+		}
+		address = address[i+3:]
+	}
+	if strings.ContainsAny(address, "/?#@") {
+		return false
+	}
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil || (net.ParseIP(host) == nil && !validHostname(host)) {
+		return false
+	}
+	for _, c := range portText {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	port, err := strconv.Atoi(portText)
+	return err == nil && port >= 1 && port <= 65535
+}
+
+func promptEndpoint(sc *bufio.Scanner, out io.Writer, current string) string {
+	for {
+		fmt.Fprintln(out, "  Endpoint:")
+		for i, endpoint := range setupEndpoints {
+			fmt.Fprintf(out, "    %d) %s — %s\n", i+1, endpoint.name, endpoint.address)
+		}
+		fmt.Fprintln(out, "    5) Custom")
+		fmt.Fprintf(out, "  Choose 1-5 [%s]: ", current)
+		if !sc.Scan() {
+			return current
+		}
+		choice := strings.TrimSpace(sc.Text())
+		if choice == "" {
+			return current
+		}
+		if n, err := strconv.Atoi(choice); err == nil && n >= 1 && n <= len(setupEndpoints) {
+			return setupEndpoints[n-1].address
+		}
+		if choice != "5" {
+			fmt.Fprintln(out, "  Invalid choice; enter 1-5.")
+			continue
+		}
+		for {
+			fmt.Fprint(out, "  Custom [ws://|wss://]host:port (blank cancels): ")
+			if !sc.Scan() || sc.Text() == "" {
+				return current
+			}
+			if endpoint := sc.Text(); validEndpoint(endpoint) {
+				return endpoint
+			}
+			fmt.Fprintln(out, "  Invalid endpoint; use [ws://|wss://]host:port with port 1-65535.")
+		}
+	}
+}
+
 // runSetup interactively writes config.json (the zig miner's --setup flow).
 func runSetup(o *options) int {
+	return runSetupIO(o, os.Stdin, os.Stderr)
+}
+
+func runSetupIO(o *options, in io.Reader, out io.Writer) int {
 	cfgPath := o.cfgPath
 	if cfgPath == "" {
 		cfgPath = "config.json"
 	}
 	cur, err := config.Load(cfgPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not parse %s: %v\n", cfgPath, err)
+		fmt.Fprintf(out, "warning: could not parse %s: %v\n", cfgPath, err)
 	}
 	daemon, wallet, threads := defaultDaemon, defaultWallet, -1
 	if cur != nil {
@@ -525,9 +663,9 @@ func runSetup(o *options) int {
 		}
 	}
 
-	sc := bufio.NewScanner(os.Stdin)
+	sc := bufio.NewScanner(in)
 	prompt := func(label, def string) string {
-		fmt.Fprintf(os.Stderr, "  %s [%s]: ", label, def)
+		fmt.Fprintf(out, "  %s [%s]: ", label, def)
 		if !sc.Scan() {
 			return def
 		}
@@ -537,8 +675,8 @@ func runSetup(o *options) int {
 		return def
 	}
 
-	fmt.Fprintln(os.Stderr, "Setup -- press Enter to keep the current value.")
-	daemon = prompt("Daemon/pool host:port", daemon)
+	fmt.Fprintln(out, "Setup -- press Enter to keep the current value.")
+	daemon = promptEndpoint(sc, out, daemon)
 	wallet = prompt("DERO wallet", wallet)
 	if s := prompt("Threads (-1 = auto)", fmt.Sprintf("%d", threads)); s != "" {
 		if n, err := strconv.Atoi(s); err == nil {
@@ -546,9 +684,9 @@ func runSetup(o *options) int {
 		}
 	}
 	if err := config.Save(cfgPath, daemon, wallet, threads); err != nil {
-		fmt.Fprintf(os.Stderr, "error: could not write %s: %v\n", cfgPath, err)
+		fmt.Fprintf(out, "error: could not write %s: %v\n", cfgPath, err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "saved %s\n", cfgPath)
+	fmt.Fprintf(out, "saved %s\n", cfgPath)
 	return 0
 }

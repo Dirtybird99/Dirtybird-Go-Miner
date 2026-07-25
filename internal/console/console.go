@@ -25,6 +25,19 @@ func New() *Console {
 	}
 }
 
+// TerminalWidth returns stderr's current terminal width. Zero means stderr is
+// redirected; 40 is the safe fallback when an interactive terminal cannot
+// report its size.
+func (c *Console) TerminalWidth() int {
+	if !c.vt {
+		return 0
+	}
+	if width, ok := terminalWidth(); ok {
+		return width
+	}
+	return 40
+}
+
 const timeLayout = "02/01 15:04:05.000"
 
 // Logf prints a permanent, timestamped line, clearing any status line first.

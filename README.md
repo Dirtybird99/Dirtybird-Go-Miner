@@ -48,7 +48,10 @@ or run `start.bat` (Windows) / `bash script.sh` (Linux/macOS), or drop a
 
 Precedence: CLI flags > config.json > built-in defaults. If you don't set a
 wallet you mine to the bundled community wallet. `--setup` edits config.json
-interactively.
+interactively and offers Community Pools, Rabid Mining, dero-node.net solo,
+the DERO Foundation solo/full-block node, or a validated custom endpoint.
+Pools are the phone-friendly choice because they pay smaller shares more
+often; solo nodes have longer reward intervals.
 
 ## Usage
 
