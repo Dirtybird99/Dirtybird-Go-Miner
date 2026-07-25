@@ -322,11 +322,99 @@ const (
 	aBRed    = "\x1b[91m"
 )
 
+const hashrateWindowSlots = 10
+
+type hashratePoint struct {
+	at     time.Time
+	hashes uint64
+}
+
+type hashrateWindow struct {
+	points [hashrateWindowSlots]hashratePoint
+	start  hashratePoint
+	next   int
+}
+
+func newHashrateWindow(at time.Time, hashes uint64) hashrateWindow {
+	start := hashratePoint{at: at, hashes: hashes}
+	w := hashrateWindow{start: start}
+	for i := range w.points {
+		w.points[i] = start
+	}
+	return w
+}
+
+func rateKHS(hashes uint64, elapsed time.Duration) float64 {
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(hashes) / elapsed.Seconds() / 1000
+}
+
+func rateBetween(newer, older hashratePoint) float64 {
+	if newer.hashes < older.hashes {
+		return 0
+	}
+	return rateKHS(newer.hashes-older.hashes, newer.at.Sub(older.at))
+}
+
+func (w *hashrateWindow) sample(at time.Time, hashes uint64) float64 {
+	current := hashratePoint{at: at, hashes: hashes}
+	old := w.points[w.next]
+	w.points[w.next] = current
+	w.next = (w.next + 1) % len(w.points)
+	return rateBetween(current, old)
+}
+
+func (w *hashrateWindow) average(at time.Time, hashes uint64) float64 {
+	return rateBetween(hashratePoint{at: at, hashes: hashes}, w.start)
+}
+
+type statusFields struct {
+	rate, average                        float64
+	height, miniblocks, blocks, rejected uint64
+	diff                                 string
+	uptime                               time.Duration
+	verbose                              bool
+	submitted, stale, sendFails          uint64
+}
+
+func formatStatusLine(s statusFields, color bool) string {
+	reset, yellow, brightGreen, brightWhite := "", "", "", ""
+	green, blue, cyan, magenta, white, brightRed := "", "", "", "", "", ""
+	if color {
+		reset, yellow, brightGreen, brightWhite = aReset, aBYellow, aBGreen, aBWhite
+		green, blue, cyan, magenta, white, brightRed = aGreen, aBlue, aCyan, aMagenta, aWhite, aBRed
+	}
+	rejectedColor := white
+	if s.rejected > 0 {
+		rejectedColor = brightRed
+	}
+	seconds := int(s.uptime.Seconds())
+	line := fmt.Sprintf(yellow+"[DIRTYBIRD] "+
+		brightGreen+"%.2f KH/s"+brightWhite+" ("+green+"%.2f KH/s avg"+brightWhite+")"+
+		" | "+blue+"Height:%d"+brightWhite+
+		" | "+cyan+"Miniblocks:%d"+brightWhite+
+		" | "+green+"Blocks:%d"+brightWhite+
+		" | "+rejectedColor+"REJ:%d"+brightWhite+
+		" | "+magenta+"Diff:%s"+brightWhite+
+		" | "+white+"%02d:%02d:%02d"+brightWhite+reset,
+		s.rate, s.average, s.height, s.miniblocks, s.blocks, s.rejected,
+		s.diff, seconds/3600, seconds/60%60, seconds%60)
+	if s.verbose {
+		line += fmt.Sprintf(" | funnel submitted:%d acc:%d rej:%d stale:%d sendfail:%d",
+			s.submitted, s.miniblocks, s.rejected, s.stale, s.sendFails)
+	}
+	return line
+}
+
 // statusLoop renders the family status line at 1 Hz until ctx ends:
 // [DIRTYBIRD] rate (avg) | Height | Miniblocks | Blocks | REJ | Diff | uptime
 // — byte-for-byte the zig miner's reporter().
 func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, client *getwork.Client, o *options) {
 	start := time.Now()
+	startHashes := st.TotalHashes.Load()
+	rates := newHashrateWindow(start, startHashes)
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 
@@ -338,21 +426,11 @@ func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, cli
 	gcTick := time.NewTicker(time.Hour)
 	defer gcTick.Stop()
 
-	// The displayed rate is a ~15s sliding window (real timestamps), not the
+	// The displayed rate is a ~10s sliding window (real timestamps), not the
 	// raw 1s delta: per-thread counters flush in 16-hash chunks and tick
 	// spacing jitters, so a 1s window bounces several percent around a flat
 	// true rate. The ring starts filled with the start point, so the readout
 	// ramps as an avg-since-start until the window is full.
-	type ratePoint struct {
-		t time.Time
-		h uint64
-	}
-	const rateSlots = 16
-	var ring [rateSlots]ratePoint
-	for i := range ring {
-		ring[i] = ratePoint{t: start}
-	}
-	tickN := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -364,38 +442,25 @@ func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, cli
 		}
 		cur := st.TotalHashes.Load()
 		now := time.Now()
-		slot := tickN % rateSlots
-		old := ring[slot] // the sample rateSlots ticks ago
-		ring[slot] = ratePoint{t: now, h: cur}
-		tickN++
-		dt := now.Sub(old.t).Seconds()
-		if dt <= 0 {
-			dt = 1
-		}
-		rate := float64(cur-old.h) / dt / 1000 // KH/s over the window
-		elapsed := time.Since(start)
-		avg := float64(cur) / elapsed.Seconds() / 1000
-		up := int(elapsed.Seconds())
+		rate := rates.sample(now, cur)
+		elapsed := now.Sub(start)
+		avg := rates.average(now, cur)
 		rej := st.Rejected.Load()
-		rejcol := aWhite
-		if rej > 0 {
-			rejcol = aBRed
+		fields := statusFields{
+			rate:       rate,
+			average:    avg,
+			height:     st.Height.Load(),
+			miniblocks: st.MiniBlocks.Load(),
+			blocks:     st.Blocks.Load(),
+			rejected:   rej,
+			diff:       fmtDiff(st.Diff.Load()),
+			uptime:     elapsed,
+			verbose:    o.verbose,
+			submitted:  st.Submitted.Load(),
+			stale:      st.Stale.Load(),
+			sendFails:  client.SendFails.Load(),
 		}
-		line := fmt.Sprintf(aBYellow+"[DIRTYBIRD] "+
-			aBGreen+"%.2f KH/s"+aBWhite+" ("+aGreen+"%.2f KH/s avg"+aBWhite+")"+
-			" | "+aBlue+"Height:%d"+aBWhite+
-			" | "+aCyan+"Miniblocks:%d"+aBWhite+
-			" | "+aGreen+"Blocks:%d"+aBWhite+
-			" | "+rejcol+"REJ:%d"+aBWhite+
-			" | "+aMagenta+"Diff:%s"+aBWhite+
-			" | "+aWhite+"%02d:%02d:%02d"+aBWhite+aReset,
-			rate, avg, st.Height.Load(), st.MiniBlocks.Load(), st.Blocks.Load(),
-			rej, fmtDiff(st.Diff.Load()), up/3600, up/60%60, up%60)
-		if o.verbose {
-			line += fmt.Sprintf(" | funnel submitted:%d acc:%d rej:%d stale:%d sendfail:%d",
-				st.Submitted.Load(), st.MiniBlocks.Load(), rej, st.Stale.Load(), client.SendFails.Load())
-		}
-		cons.Status(line)
+		cons.Status(formatStatusLine(fields, true), formatStatusLine(fields, false))
 	}
 }
 

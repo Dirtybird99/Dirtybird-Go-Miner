@@ -11,14 +11,18 @@ import (
 )
 
 type Console struct {
-	mu sync.Mutex
-	vt bool // stderr is a terminal with VT processing enabled
+	mu          sync.Mutex
+	vt          bool // stderr is a terminal with VT processing enabled
+	forceStatus bool // emit plain status records when stderr is redirected
 }
 
 func New() *Console {
 	// GOMINER_FORCE_STATUS=1 emits the status line even when stderr is not a
-	// terminal (raw-capture verification; the zig miner always emits it).
-	return &Console{vt: enableVT() || os.Getenv("GOMINER_FORCE_STATUS") == "1"}
+	// terminal (HiveOS and raw-capture verification).
+	return &Console{
+		vt:          enableVT(),
+		forceStatus: os.Getenv("GOMINER_FORCE_STATUS") == "1",
+	}
 }
 
 const timeLayout = "02/01 15:04:05.000"
@@ -33,13 +37,17 @@ func (c *Console) Logf(level, format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "%s  %-5s %s\n", time.Now().Format(timeLayout), level, fmt.Sprintf(format, args...))
 }
 
-// Status rewrites the transient status line (terminal only; no-op when piped
-// so logs stay clean).
-func (c *Console) Status(line string) {
-	if !c.vt {
+// Status rewrites the transient terminal line. Forced redirected output uses
+// a separate plain, newline-terminated record so Hive logs contain no VT data.
+func (c *Console) Status(terminalLine, plainLine string) {
+	if !c.vt && !c.forceStatus {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fmt.Fprintf(os.Stderr, "\r\x1b[K%s", line)
+	if c.vt {
+		fmt.Fprintf(os.Stderr, "\r\x1b[K%s", terminalLine)
+		return
+	}
+	fmt.Fprintln(os.Stderr, plainLine)
 }

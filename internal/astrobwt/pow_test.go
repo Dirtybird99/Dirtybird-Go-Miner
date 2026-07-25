@@ -82,10 +82,12 @@ func TestDifferentialVsReference(t *testing.T) {
 
 func TestZeroAllocs(t *testing.T) {
 	h := New()
-	var work [48]byte
-	rand.Read(work[:])
+	work, err := hex.DecodeString("f3d522db38fab17a879fcbb6acfe922163505bd23a6842f6ef6397ae5fb6e6016421998bd43b0142b03ca3b16d6ccb7a")
+	if err != nil {
+		t.Fatal(err)
+	}
 	allocs := testing.AllocsPerRun(100, func() {
-		_ = h.Hash(work[:])
+		_ = h.Hash(work)
 	})
 	if allocs != 0 {
 		t.Fatalf("Hash allocates %v times per run, want 0", allocs)

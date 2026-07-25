@@ -24,6 +24,7 @@ type ScratchData struct {
 	flags      [280]byte
 	useV114    bool
 	v114       *v114Scratch
+	saisTmp    [MAX_LENGTH / 2]int32
 }
 
 func NewScratchData() *ScratchData {
@@ -32,13 +33,12 @@ func NewScratchData() *ScratchData {
 	return d
 }
 
-func text_32_0alloc(text []byte, sa []int32) {
+func text_32_0alloc(text []byte, sa, tmp []int32) {
 	if int(int32(len(text))) != len(text) || len(text) != len(sa) {
 		panic("suffixarray: misuse of text_32")
 	}
 	for i := range sa {
 		sa[i] = 0
 	}
-	var memory [2 * 256]int32
-	sais_8_32(text, 256, sa, memory[:])
+	sais_8_32(text, 256, sa, tmp)
 }

@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Builds the full release asset set into dist/ (family layout, same asset
-# names as the Zig miner): usage  scripts/release.sh v0.1.2
+# names as the Zig miner): usage  scripts/release.sh vX.Y.Z
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${1:?usage: scripts/release.sh vX.Y.Z}"
+[[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+  echo "version must match vX.Y.Z, got '$VERSION'" >&2
+  exit 1
+}
 NAME="Dirtybird-Go-Miner"
 LDFLAGS="-s -w -X main.version=${VERSION}"
 PGO="-pgo=default.pgo"
@@ -27,7 +31,7 @@ matrix | while read -r plat goos goarch amd64 suffix launcher; do
   echo "== ${plat} (${goos}/${goarch}) =="
   env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
       $( [ "$amd64" = "v3" ] && echo "GOAMD64=v3" ) \
-      go build $PGO -trimpath -ldflags "$LDFLAGS" -o "${stage}/go-miner${suffix}" .
+      go build -mod=readonly $PGO -trimpath -ldflags "$LDFLAGS" -o "${stage}/go-miner${suffix}" .
   cp config.json README.md LICENSE THIRD-PARTY-LICENSES "$stage/"
   cp internal/astrobwt/LICENSE-DERO.txt "$stage/"
   cp "$launcher" "$stage/"
@@ -55,7 +59,7 @@ hminer="${hbase%-$hversion}"
 hstage="dist/${HIVE_NAME}"
 mkdir -p "$hstage"
 env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
-    go build $PGO -trimpath -ldflags "$LDFLAGS" -o "${hstage}/go-miner" .
+    go build -mod=readonly $PGO -trimpath -ldflags "$LDFLAGS" -o "${hstage}/go-miner" .
 cp config/h-manifest.conf config/h-config.sh config/h-run.sh config/h-stats.sh "$hstage/"
 sed -i "s/^CUSTOM_VERSION=.*/CUSTOM_VERSION=${VERSION#v}/" "${hstage}/h-manifest.conf"
 chmod 0755 "${hstage}/go-miner" "${hstage}"/h-*.sh
