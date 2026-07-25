@@ -16,7 +16,7 @@ type ScratchData struct {
 	data     [MAX_LENGTH + 64]uint8
 	sa       [MAX_LENGTH]int32
 	sa_bytes *[(MAX_LENGTH) * 4]uint8
-	saisTmp  [2 * 256]int32
+	saisTmp  [MAX_LENGTH / 2]int32
 
 	// v114 descriptor-SA state: template markers recorded by the wolf loop
 	// (free bookkeeping) and the lazily-allocated stage-4/5 buffers.
