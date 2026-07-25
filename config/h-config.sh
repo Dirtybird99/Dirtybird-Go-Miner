@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # Fall back to the community-pool preset if the flight sheet left the pool URL blank.
 : "${CUSTOM_URL:=community-pools.mysrv.cloud:10300}"
 if [[ $CUSTOM_URL == wss* ]]; then

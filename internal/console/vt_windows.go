@@ -17,3 +17,12 @@ func enableVT() bool {
 	}
 	return true
 }
+
+func terminalWidth() (int, bool) {
+	var info windows.ConsoleScreenBufferInfo
+	if err := windows.GetConsoleScreenBufferInfo(windows.Handle(windows.Stderr), &info); err != nil {
+		return 0, false
+	}
+	width := int(info.Window.Right-info.Window.Left) + 1
+	return width, width > 0
+}
