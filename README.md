@@ -53,6 +53,26 @@ the DERO Foundation solo/full-block node, or a validated custom endpoint.
 Pools are the phone-friendly choice because they pay smaller shares more
 often; solo nodes have longer reward intervals.
 
+## Android (Termux)
+
+Install [Termux](https://f-droid.org/en/packages/com.termux/) (F-Droid build),
+then:
+
+```
+curl -fsSL https://raw.githubusercontent.com/Dirtybird99/Dirtybird-Go-Miner/main/scripts/termux-setup.sh | bash
+```
+
+The script installs the latest arm64 release into `~/dirtybird-go-miner`,
+prompts for pool/wallet/threads (defaulting to all-cores-minus-one), acquires
+a wake-lock so Android Doze doesn't pause mining, and restarts the miner if it
+crashes. Re-run with `--reconfigure` to change settings, `--update` to
+upgrade, `--uninstall` to remove.
+
+Notes for phones: `-pin`/`-high` have no effect on Android — use the thread
+count to balance hashrate, temperature, and battery. The 2-way batched final
+hash is on by default on arm64 (`--pair=false` disables it). Mining on
+battery drains it fast; keep the device plugged in and ventilated.
+
 ## Usage
 
 | Flag | Meaning |
