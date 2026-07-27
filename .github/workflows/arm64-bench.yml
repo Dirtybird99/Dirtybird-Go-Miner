@@ -1,0 +1,70 @@
+name: arm64-bench
+
+# Native aarch64 measurement rig on GitHub's free ubuntu-24.04-arm runners
+# (real ARMv8 silicon — qemu is correct for byte-exactness and worthless for
+# performance). Dispatch-only so every run is attributable. Numbers from a
+# shared runner order alternatives (pair vs single); they are not absolute
+# hashrate claims.
+#
+# Once an optimization loop starts, THIS FILE IS THE MEASURING INSTRUMENT and
+# must not be edited to make a number move.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "smoke (runner facts + gates only) | bench (micro) | pair (micro + sustained pair-vs-single)"
+        default: "bench"
+      benchtime:
+        description: "go test -benchtime value for the micro benches"
+        default: "1200x"
+      count:
+        description: "micro bench repetitions (discard the first as warmup)"
+        default: "7"
+      secs:
+        description: "sustained leg length in seconds (pair mode)"
+        default: "120"
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Runner facts
+        run: |
+          uname -a
+          nproc
+          grep -m1 Features /proc/cpuinfo || true
+      - name: Correctness gates (native SHA2 silicon)
+        run: |
+          go test ./internal/astrobwt -count=1 -v \
+            -run '^(TestKAT|TestDifferentialVsReference|TestHashPairMatchesHash|TestPairDifferentialVsSingle)$' \
+            | tee gates.txt
+          grep -q 'pairHashAvailable=true' gates.txt # hardware batch path must be live
+      - name: Micro bench (single vs pair)
+        if: inputs.mode != 'smoke'
+        run: |
+          # BenchmarkHashPairV114 does TWO hashes per iteration: compare its
+          # ns/op against 2x BenchmarkHashV114 ns/op.
+          go test ./internal/astrobwt -run - \
+            -bench '^(BenchmarkHashV114|BenchmarkHashPairV114)$' \
+            -benchtime "${{ inputs.benchtime }}" -count "${{ inputs.count }}" | tee bench.txt
+      - name: Sustained pair vs single
+        if: inputs.mode == 'pair'
+        run: |
+          go build -trimpath -o go-miner-arm .
+          ./go-miner-arm -sustained -secs "${{ inputs.secs }}" -t "$(nproc)" -pair=false | tee sustained-single.txt
+          sleep 30
+          ./go-miner-arm -sustained -secs "${{ inputs.secs }}" -t "$(nproc)" -pair=true | tee sustained-pair.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm64-bench-${{ inputs.mode }}
+          path: |
+            gates.txt
+            bench.txt
+            sustained-*.txt
+          if-no-files-found: ignore

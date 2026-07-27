@@ -24,5 +24,10 @@ func terminalWidth() (int, bool) {
 		return 0, false
 	}
 	width := int(info.Window.Right-info.Window.Left) + 1
+	// conhost wraps at the screen *buffer* width when that is narrower than
+	// the window.
+	if buf := int(info.Size.X); buf > 0 && buf < width {
+		width = buf
+	}
 	return width, width > 0
 }

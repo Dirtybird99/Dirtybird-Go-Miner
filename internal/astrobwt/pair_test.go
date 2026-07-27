@@ -1,9 +1,39 @@
 package astrobwt
 
 import (
+	stdsha256 "crypto/sha256"
 	"math/rand"
 	"testing"
 )
+
+// TestPairDifferentialVsSingle pins the multi-buffer SHA kernel itself
+// against crypto/sha256 over varied lengths, including block boundaries and
+// unequal pairs. The end-to-end gates (KAT, TestHashPairMatchesHash) only
+// feed the kernel the miner's own sizes; the Rust port learned that a wrong
+// two-stream kernel can slip past gates that never vary the block count.
+func TestPairDifferentialVsSingle(t *testing.T) {
+	t.Logf("pairHashPossible=%v pairHashAvailable=%v", pairHashPossible, pairHashAvailable())
+	rnd := rand.New(rand.NewSource(42))
+	lengths := []int{
+		1, 2, 31, 32, 47, 48, 55, 56, 57, 63, 64, 65,
+		119, 120, 127, 128, 129, 191, 192, 255, 1024, 4096, 283 * 1024,
+	}
+	buf := make([]byte, 283*1024)
+	rnd.Read(buf)
+	for _, la := range lengths {
+		for _, lb := range lengths {
+			a := buf[:la]
+			b := buf[len(buf)-lb:]
+			ga, gb := sha256Sum256Pair(a, b)
+			if wa := stdsha256.Sum256(a); ga != wa {
+				t.Fatalf("len(a)=%d len(b)=%d: lane A digest mismatch\ngot  %x\nwant %x", la, lb, ga, wa)
+			}
+			if wb := stdsha256.Sum256(b); gb != wb {
+				t.Fatalf("len(a)=%d len(b)=%d: lane B digest mismatch\ngot  %x\nwant %x", la, lb, gb, wb)
+			}
+		}
+	}
+}
 
 // HashPair must be byte-identical to two independent Hash calls, on both
 // backends and across varied input lengths.

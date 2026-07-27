@@ -79,6 +79,24 @@ jobs:
         run: |
           go build -pgo=default.pgo -trimpath -o go-miner-ci .
           ./go-miner-ci --selftest
+      - name: Cross-build linux/arm64
+        if: matrix.os == 'ubuntu-latest'
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -pgo=default.pgo -trimpath -o go-miner-arm64 .
+      # qemu-user executes the arm64 SHA2/NEON paths, so the release
+      # architecture is correctness-gated on every PR, not on release day.
+      - name: arm64 selftest + hash gates (qemu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static
+          qemu-aarch64-static ./go-miner-arm64 --selftest
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go test -c -o astrobwt-arm64.test ./internal/astrobwt
+          qemu-aarch64-static ./astrobwt-arm64.test -test.run '^(TestHashPairMatchesHash|TestPairDifferentialVsSingle)$' -test.v > arm64-tests.log 2>&1 || { cat arm64-tests.log; exit 1; }
+          cat arm64-tests.log
+          # A filter that matches nothing exits 0 — require real passes, and
+          # require the hardware batch path (not the fallback) under qemu.
+          grep -q -- "--- PASS" arm64-tests.log
+          grep -q "pairHashAvailable=true" arm64-tests.log
       - name: Package smoke
         if: runner.os == 'Linux'
         shell: bash

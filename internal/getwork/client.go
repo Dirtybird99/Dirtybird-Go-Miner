@@ -27,6 +27,10 @@ type Client struct {
 	OnJob    func(Job)     // called from the reader goroutine
 	Submits  <-chan Submit // drained by the writer goroutine
 	Logf     func(format string, args ...interface{})
+	// Errorf receives connection-failure records. Unlike Debugf chatter these
+	// are always-on in the family CLIs (a phone user cannot tell a slow
+	// handshake from a hang without them). May be nil.
+	Errorf func(format string, args ...interface{})
 	// Debugf receives retry/loss/submit-failure chatter that the family CLIs
 	// keep silent by default (the zig miner reconnects without a word). May be
 	// nil.
@@ -39,6 +43,12 @@ type Client struct {
 func (c *Client) debugf(format string, args ...interface{}) {
 	if c.Debugf != nil {
 		c.Debugf(format, args...)
+	}
+}
+
+func (c *Client) errorf(format string, args ...interface{}) {
+	if c.Errorf != nil {
+		c.Errorf(format, args...)
 	}
 }
 
@@ -65,7 +75,7 @@ func (c *Client) URL() string {
 func (c *Client) Run(ctx context.Context) {
 	backoff := initialBackoff
 	for ctx.Err() == nil {
-		jobs := c.connectAndServe(ctx)
+		jobs, err := c.connectAndServe(ctx)
 		if ctx.Err() != nil {
 			return
 		}
@@ -73,7 +83,10 @@ func (c *Client) Run(ctx context.Context) {
 			backoff = initialBackoff
 			continue // a live link dropped: redial immediately
 		}
-		c.debugf("connect to %s failed, retrying in %v", c.Endpoint, backoff)
+		if err != nil {
+			c.errorf("Connection failed (%s): %v", c.HostPort(), err)
+		}
+		c.Logf("Retrying in %ds", int(backoff.Seconds()))
 		select {
 		case <-ctx.Done():
 			return
@@ -86,20 +99,24 @@ func (c *Client) Run(ctx context.Context) {
 	}
 }
 
-// connectAndServe runs one connection to completion and reports how many jobs
-// it delivered.
-func (c *Client) connectAndServe(ctx context.Context) (jobs uint64) {
+// connectAndServe runs one connection to completion, reporting how many jobs
+// it delivered and the dial error if the connection never came up (read-loop
+// losses on an established link stay Debugf chatter).
+func (c *Client) connectAndServe(ctx context.Context) (jobs uint64, err error) {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: handshakeTimeout,
 		// The daemon presents a random self-signed certificate; verification
 		// must be off (same as the official miner and every family miner).
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		// Resolve through public-DNS fallbacks when the system resolver is
+		// unusable (Termux/Android has no /etc/resolv.conf) — dns.go.
+		NetDialContext: dialContextDNSFallback,
 	}
 	c.Logf("Connecting (%s)", c.HostPort())
 	dialStart := time.Now()
 	conn, _, err := dialer.DialContext(ctx, c.URL(), nil)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	defer conn.Close()
 
@@ -142,7 +159,7 @@ func (c *Client) connectAndServe(ctx context.Context) (jobs uint64) {
 			}
 			conn.Close()
 			<-writerDone
-			return jobs
+			return jobs, nil
 		}
 		jobs++
 		c.OnJob(j)

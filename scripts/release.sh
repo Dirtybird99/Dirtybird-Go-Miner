@@ -35,6 +35,11 @@ matrix | while read -r plat goos goarch amd64 suffix launcher; do
   cp config.json README.md LICENSE THIRD-PARTY-LICENSES "$stage/"
   cp internal/astrobwt/LICENSE-DERO.txt "$stage/"
   cp "$launcher" "$stage/"
+  if [ "$plat" = "arm64" ]; then
+    # Termux users get the installer offline too.
+    cp scripts/termux-setup.sh "$stage/"
+    chmod 0755 "$stage/termux-setup.sh"
+  fi
   if [ "$goos" = "windows" ]; then
     (cd dist && zip -qr "${NAME}-${plat}-${VERSION}.zip" "${NAME}-${plat}-${VERSION}")
   else

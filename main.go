@@ -65,6 +65,15 @@ func (o *options) backend() astrobwt.Backend {
 
 func validSAName(name string) bool { return name == "v114" || name == "sais" }
 
+// defaultPairMode: the 2-way batched final hash defaults on for arm64 with
+// the SHA2 extensions (family parity with the Rust miner — the interleaved
+// kernel wins on every ARM core measured) and stays opt-in on amd64, where
+// it costs ~1% at high thread counts from the doubled working set. An
+// explicit -pair=false always wins over the default.
+func defaultPairMode() bool {
+	return runtime.GOARCH == "arm64" && astrobwt.PairHashSupported()
+}
+
 func parseFlags() *options {
 	o := &options{}
 	flag.StringVar(&o.daemon, "d", "", "")
@@ -85,7 +94,7 @@ func parseFlags() *options {
 	flag.BoolVar(&o.dryRun, "dry-run", false, "")
 	flag.BoolVar(&o.pin, "pin", false, "")
 	flag.BoolVar(&o.high, "high", false, "")
-	flag.BoolVar(&o.pair, "pair", false, "")
+	flag.BoolVar(&o.pair, "pair", defaultPairMode(), "")
 	flag.StringVar(&o.saName, "sa", "v114", "")
 	flag.BoolVar(&o.debugFlag, "debug", false, "")
 	flag.StringVar(&o.cpuProfile, "cpuprofile", "", "")
@@ -118,7 +127,8 @@ advanced (benchmarking/tuning):
   --sustained --secs N   fixed-window all-threads benchmark
   --statbench --secs N    real-worker status-line stability benchmark
   --pin / --high         P-core-first thread pinning / HIGH process priority
-  --pair                 2 nonces/thread with 2-way SHA-NI final hash
+  --pair                 2 nonces/thread with a 2-way batched final hash
+                         (default on arm64 with SHA2; --pair=false disables)
   --sa v114|sais         suffix-array backend (default v114)
   --dry-run / --debug / --cpuprofile <file>
 `, defaultDaemon)
@@ -214,11 +224,7 @@ func run() int {
 
 	cfgPath := o.cfgPath
 	if cfgPath == "" {
-		if exe, err := os.Executable(); err == nil {
-			cfgPath = filepath.Join(filepath.Dir(exe), "config.json")
-		} else {
-			cfgPath = "config.json"
-		}
+		cfgPath = defaultConfigPath()
 	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -227,16 +233,22 @@ func run() int {
 	}
 	o.resolve(cfg)
 
-	// Startup banner: the family look (zig miner main.zig ordering).
-	cons.Logf("INFO", "Dirtybird Miner")
+	// Startup banner: the family look (zig miner ordering, Rust PR #18
+	// version/platform line and wallet elision).
+	cons.Logf("INFO", "Dirtybird Go Miner %s (%s/%s)", version, runtime.GOOS, runtime.GOARCH)
 	cons.Logf("INFO", "Server:  %s", serverDisplay(o.daemon))
-	cons.Logf("INFO", "Wallet:  %s", o.wallet)
+	cons.Logf("INFO", "Wallet:  %s", elideWallet(o.wallet))
 	cons.Logf("INFO", "Threads: %d", o.threads)
 	cons.Logf("INFO", "CPU: %s", cpuBrand())
-	cons.Logf("INFO", "Features: avx2 %s | avx512 %s | sha %s",
-		yesNo(cpuid.CPU.Supports(cpuid.AVX2)), yesNo(cpuid.CPU.Supports(cpuid.AVX512F)), yesNo(cpuid.CPU.Supports(cpuid.SHA)))
-	cons.Logf("INFO", "Fast path: SHA-NI build %s; AVX512 mining path No",
-		yesNo(cpuid.CPU.Supports(cpuid.SHA, cpuid.SSSE3, cpuid.SSE4)))
+	if runtime.GOARCH == "arm64" {
+		cons.Logf("INFO", "Features: sha2 %s", yesNo(cpuid.CPU.Supports(cpuid.SHA2)))
+		cons.Logf("INFO", "Fast path: 2-way SHA2 batch %s", yesNo(o.pair && astrobwt.PairHashSupported()))
+	} else {
+		cons.Logf("INFO", "Features: avx2 %s | avx512 %s | sha %s",
+			yesNo(cpuid.CPU.Supports(cpuid.AVX2)), yesNo(cpuid.CPU.Supports(cpuid.AVX512F)), yesNo(cpuid.CPU.Supports(cpuid.SHA)))
+		cons.Logf("INFO", "Fast path: SHA-NI build %s; AVX512 mining path No",
+			yesNo(cpuid.CPU.Supports(cpuid.SHA, cpuid.SSSE3, cpuid.SSE4)))
+	}
 	fmt.Fprintln(os.Stderr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -253,6 +265,9 @@ func run() int {
 		Submits:  submits,
 		Logf: func(format string, args ...interface{}) {
 			cons.Logf("INFO", format, args...)
+		},
+		Errorf: func(format string, args ...interface{}) {
+			cons.Logf("ERROR", format, args...)
 		},
 	}
 	if o.debugFlag {
@@ -318,21 +333,6 @@ func run() int {
 	return 0
 }
 
-// ANSI palette for the status line (the zig miner's main.zig set; log lines
-// stay uncolored).
-const (
-	aReset   = "\x1b[0m"
-	aBYellow = "\x1b[93m"
-	aBGreen  = "\x1b[92m"
-	aBWhite  = "\x1b[97m"
-	aGreen   = "\x1b[32m"
-	aBlue    = "\x1b[34m"
-	aCyan    = "\x1b[36m"
-	aMagenta = "\x1b[35m"
-	aWhite   = "\x1b[37m"
-	aBRed    = "\x1b[91m"
-)
-
 const hashrateWindowSlots = 10
 
 type hashratePoint struct {
@@ -381,85 +381,16 @@ func (w *hashrateWindow) average(at time.Time, hashes uint64) float64 {
 	return rateBetween(hashratePoint{at: at, hashes: hashes}, w.start)
 }
 
-type statusFields struct {
-	rate, average                        float64
-	height, miniblocks, blocks, rejected uint64
-	diff                                 string
-	uptime                               time.Duration
-	verbose                              bool
-	submitted, stale, sendFails          uint64
-}
-
-func statusLayouts(s statusFields, color bool) (full, compact, minimal string) {
-	reset, yellow, brightGreen, brightWhite := "", "", "", ""
-	green, blue, cyan, magenta, white, brightRed := "", "", "", "", "", ""
-	if color {
-		reset, yellow, brightGreen, brightWhite = aReset, aBYellow, aBGreen, aBWhite
-		green, blue, cyan, magenta, white, brightRed = aGreen, aBlue, aCyan, aMagenta, aWhite, aBRed
-	}
-	rejectedColor := white
-	if s.rejected > 0 {
-		rejectedColor = brightRed
-	}
-	seconds := int(s.uptime.Seconds())
-	full = fmt.Sprintf(yellow+"[DIRTYBIRD] "+
-		brightGreen+"%.2f KH/s"+brightWhite+" ("+green+"%.2f KH/s avg"+brightWhite+")"+
-		" | "+blue+"Height:%d"+brightWhite+
-		" | "+cyan+"Miniblocks:%d"+brightWhite+
-		" | "+green+"Blocks:%d"+brightWhite+
-		" | "+rejectedColor+"REJ:%d"+brightWhite+
-		" | "+magenta+"Diff:%s"+brightWhite+
-		" | "+white+"%02d:%02d:%02d"+brightWhite+reset,
-		s.rate, s.average, s.height, s.miniblocks, s.blocks, s.rejected,
-		s.diff, seconds/3600, seconds/60%60, seconds%60)
-	if s.verbose {
-		full += fmt.Sprintf(" | funnel submitted:%d acc:%d rej:%d stale:%d sendfail:%d",
-			s.submitted, s.miniblocks, s.rejected, s.stale, s.sendFails)
-	}
-	compact = fmt.Sprintf(yellow+"[DIRTYBIRD] "+brightGreen+"%.2f KH/s"+brightWhite+
-		" H:"+blue+"%d"+brightWhite+
-		" M:"+cyan+"%d"+brightWhite+
-		" B:"+green+"%d"+brightWhite+
-		" R:"+rejectedColor+"%d"+reset,
-		s.rate, s.height, s.miniblocks, s.blocks, s.rejected)
-	minimal = fmt.Sprintf(brightGreen+"%.2f KH/s"+brightWhite+" H:"+blue+"%d"+reset,
-		s.rate, s.height)
-	return full, compact, minimal
-}
-
-// formatStatusLine keeps redirected records complete (columns <= 0), while an
-// interactive terminal gets the richest layout that fits without using its
-// final column. If even the minimal layout is too wide, return a clipped
-// uncolored record so ANSI sequences can never be cut in half.
-func formatStatusLine(s statusFields, color bool, columns int) string {
-	width := columns
-	if width > 1 {
-		width--
-	}
-	plainFull, plainCompact, plainMinimal := statusLayouts(s, false)
-	full, compact, minimal := plainFull, plainCompact, plainMinimal
-	if color {
-		full, compact, minimal = statusLayouts(s, true)
-	}
-	switch {
-	case width <= 0 || len(plainFull) <= width:
-		return full
-	case len(plainCompact) <= width:
-		return compact
-	case len(plainMinimal) <= width:
-		return minimal
-	default:
-		return plainMinimal[:width]
-	}
-}
-
-// statusLoop renders the family status line at 1 Hz until ctx ends:
-// [DIRTYBIRD] rate (avg) | Height | Miniblocks | Blocks | REJ | Diff | uptime
-// — byte-for-byte the zig miner's reporter().
+// statusLoop renders the family status line at 1 Hz until ctx ends. A wide
+// terminal gets the FULL tier ([DIRTYBIRD] rate (avg) | Height | ... —
+// byte-for-byte the zig miner's reporter()); a narrowing terminal steps down
+// the five-tier ladder in status.go. A redirected stream gets the plain FULL
+// line as one newline record per tick.
 func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, client *getwork.Client, o *options) {
 	start := time.Now()
 	startHashes := st.TotalHashes.Load()
 	rates := newHashrateWindow(start, startHashes)
+	pal := console.ResolvePalette(cons.VT(), os.Getenv("NO_COLOR") != "")
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 
@@ -488,27 +419,17 @@ func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, cli
 		cur := st.TotalHashes.Load()
 		now := time.Now()
 		rate := rates.sample(now, cur)
-		elapsed := now.Sub(start)
 		avg := rates.average(now, cur)
-		rej := st.Rejected.Load()
-		fields := statusFields{
-			rate:       rate,
-			average:    avg,
-			height:     st.Height.Load(),
-			miniblocks: st.MiniBlocks.Load(),
-			blocks:     st.Blocks.Load(),
-			rejected:   rej,
-			diff:       fmtDiff(st.Diff.Load()),
-			uptime:     elapsed,
-			verbose:    o.verbose,
-			submitted:  st.Submitted.Load(),
-			stale:      st.Stale.Load(),
-			sendFails:  client.SendFails.Load(),
+		up := int(now.Sub(start).Seconds())
+		f := snapshotStatus(st, client, rate, avg, up, o.verbose)
+		plain := renderTier(tierFull, console.Plain(), f).String()
+		terminal := plain
+		if width := cons.TerminalWidth(); width > 0 {
+			// Never write into the last column: a line ending exactly there
+			// leaves the terminal in pending-wrap state.
+			terminal = selectStatusLine(f, pal, width-1)
 		}
-		cons.Status(
-			formatStatusLine(fields, true, cons.TerminalWidth()),
-			formatStatusLine(fields, false, 0),
-		)
+		cons.Status(terminal, plain)
 	}
 }
 
@@ -636,6 +557,16 @@ func promptEndpoint(sc *bufio.Scanner, out io.Writer, current string) string {
 	}
 }
 
+// defaultConfigPath resolves config.json beside the executable, so --setup
+// writes exactly where the mining path reads, regardless of the caller's CWD
+// (a Termux launcher runs the script from anywhere).
+func defaultConfigPath() string {
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(exe), "config.json")
+	}
+	return "config.json"
+}
+
 // runSetup interactively writes config.json (the zig miner's --setup flow).
 func runSetup(o *options) int {
 	return runSetupIO(o, os.Stdin, os.Stderr)
@@ -644,7 +575,7 @@ func runSetup(o *options) int {
 func runSetupIO(o *options, in io.Reader, out io.Writer) int {
 	cfgPath := o.cfgPath
 	if cfgPath == "" {
-		cfgPath = "config.json"
+		cfgPath = defaultConfigPath()
 	}
 	cur, err := config.Load(cfgPath)
 	if err != nil {

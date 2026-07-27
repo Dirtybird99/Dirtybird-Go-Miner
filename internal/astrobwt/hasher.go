@@ -56,6 +56,11 @@ func (h *Hasher) HashPair(a, b []byte) (ha, hb [32]byte) {
 	return ha, hb
 }
 
+// PairHashSupported reports whether HashPair actually batches on this host
+// (multi-buffer SHA kernel present and usable). Callers use it to pick the
+// -pair default: on when batching wins by default (arm64), opt-in elsewhere.
+func PairHashSupported() bool { return pairHashAvailable() }
+
 // Sum is a convenience for one-off hashing (KAT, selftest); it allocates a
 // fresh scratch every call, so miners must use a per-worker Hasher instead.
 func Sum(input []byte) [32]byte {
