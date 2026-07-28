@@ -206,17 +206,22 @@ else
 fi
 
 # ---- version verification (surface stale installs) ------------------------
-BINARY_VERSION="$("./$BINARY_NAME" --version 2>/dev/null || true)"
+# timeout: a binary the loader accepts but whose runtime wedges (the
+# GOOS=android-without-cgo lesson) hangs forever; never let it hang the
+# installer.
+BINARY_VERSION="$(timeout 15 "./$BINARY_NAME" --version 2>/dev/null || true)"
 if [ -z "$BINARY_VERSION" ]; then
   err "Installed miner could not report its version."
   # Diagnose instead of leaving a blind failure (the family's hard-won
   # lesson): rerun the probe with output captured and report exactly how
   # it died, plus the device facts that decide ELF compatibility.
   set +e
-  PROBE_OUT="$("./$BINARY_NAME" --version 2>&1)"
+  PROBE_OUT="$(timeout 15 "./$BINARY_NAME" --version 2>&1)"
   PROBE_CODE=$?
   set -e
-  if [ "$PROBE_CODE" -gt 128 ]; then
+  if [ "$PROBE_CODE" -eq 124 ]; then
+    err "Probe timed out after 15s (binary starts but hangs)."
+  elif [ "$PROBE_CODE" -gt 128 ]; then
     err "Probe killed by signal $((PROBE_CODE - 128)) (exit $PROBE_CODE)."
   else
     err "Probe exit status: $PROBE_CODE."

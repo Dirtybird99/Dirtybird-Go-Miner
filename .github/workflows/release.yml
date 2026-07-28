@@ -98,9 +98,11 @@ jobs:
           [ "$(qemu-aarch64-static "$bin" --version)" = "go-miner $tag" ]
           qemu-aarch64-static "$bin" --selftest
           # The android-arm64 asset (what the Termux installer downloads)
-          # cannot be executed by qemu-user (bionic), so its gate is the
-          # ELF contract: PIE + /system/bin/linker64 interpreter + no
-          # DT_NEEDED. Codegen is proven by the qemu selftest above.
+          # cannot be executed by qemu-user against bionic, so its gate is
+          # the ELF contract Android's linker64 enforces: ET_DYN, linker64
+          # interpreter, no DT_NEEDED, RELATIVE-only relocations, and
+          # PT_TLS alignment >= 64. Codegen is proven by the qemu selftest
+          # above.
           mkdir "$RUNNER_TEMP/go-miner-android-smoke"
           tar -xzf "Dirtybird-Go-Miner-android-arm64-$tag.tar.gz" \
             -C "$RUNNER_TEMP/go-miner-android-smoke"
@@ -109,6 +111,15 @@ jobs:
           readelf -l "$abin" | grep -q '/system/bin/linker64'
           if readelf -d "$abin" | grep -qi needed; then
             echo "unexpected DT_NEEDED in android binary" >&2
+            exit 1
+          fi
+          if readelf -rW "$abin" | awk '/^[0-9a-f]/ && $3 != "R_AARCH64_RELATIVE"' | grep -q .; then
+            echo "non-RELATIVE dynamic relocations in android binary" >&2
+            exit 1
+          fi
+          tlsalign=$(readelf -lW "$abin" | awk '$1 == "TLS" {print $NF}')
+          if [ -n "$tlsalign" ] && [ "$((tlsalign))" -lt 64 ]; then
+            echo "PT_TLS underaligned for bionic: $tlsalign" >&2
             exit 1
           fi
           for plat in arm64 android-arm64; do
