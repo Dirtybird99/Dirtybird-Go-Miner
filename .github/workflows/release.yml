@@ -81,6 +81,29 @@ jobs:
             dirtybird-go-miner/h-manifest.conf)
           grep -qx "CUSTOM_VERSION=${tag#v}" <<<"$manifest"
 
+      # The arm64 tarball is exactly what the Termux installer downloads;
+      # qemu-user runs the published bytes (including the arm64 SHA kernel)
+      # before the release becomes immutable — the Rust sibling smokes its
+      # arm64 asset the same way.
+      - name: Smoke-test arm64 binary (qemu)
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do sudo apt-get update -qq && break || sleep 10; done
+          sudo apt-get install -y -qq qemu-user-static
+          tag="${{ steps.ver.outputs.version }}"
+          cd dist
+          mkdir "$RUNNER_TEMP/go-miner-arm64-smoke"
+          tar -xzf "Dirtybird-Go-Miner-arm64-$tag.tar.gz" -C "$RUNNER_TEMP/go-miner-arm64-smoke"
+          bin="$RUNNER_TEMP/go-miner-arm64-smoke/Dirtybird-Go-Miner-arm64-$tag/go-miner"
+          [ "$(qemu-aarch64-static "$bin" --version)" = "go-miner $tag" ]
+          qemu-aarch64-static "$bin" --selftest
+          mode=$(tar -tvf "Dirtybird-Go-Miner-arm64-$tag.tar.gz" \
+            "Dirtybird-Go-Miner-arm64-$tag/termux-setup.sh" | awk '{print $1}')
+          case "$mode" in
+            -rwx*) ;;
+            *) echo "termux-setup.sh is not executable in the arm64 asset" >&2; exit 1 ;;
+          esac
+
       - name: Publish immutable-ready release
         env:
           GH_TOKEN: ${{ github.token }}
