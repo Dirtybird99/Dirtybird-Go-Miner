@@ -64,12 +64,11 @@ The `v114stats` tag prints group-count and merge-path counters after benchmark
 runs. Normal builds do not include counter overhead.
 
 Status-line stability can be measured through the real worker pipeline without
-a daemon:
+a daemon (redirected output emits one plain status record per second, so no
+environment variable is needed; `GOMINER_FORCE_STATUS=1` is still accepted):
 
 ```powershell
-$env:GOMINER_FORCE_STATUS = "1"
-go run . --statbench --secs 90 -t 20 --pin --high
-Remove-Item Env:GOMINER_FORCE_STATUS
+go run . --statbench --secs 90 -t 20 --pin --high 2> statbench.log
 ```
 
 The 16-hash counter flush and sliding rate window target display stability;

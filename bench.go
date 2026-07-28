@@ -138,8 +138,9 @@ func runSustained(threads, secs int, pin bool, backend astrobwt.Backend, pair bo
 
 // runStatBench drives the real mining pipeline — miner.Run workers plus the
 // 1 Hz statusLoop — on a synthetic never-winning job for a fixed window, so
-// the displayed rate can be captured offline (GOMINER_FORCE_STATUS=1) and its
-// stability measured. No daemon involved; nothing is ever submitted.
+// the displayed rate can be captured offline (redirected stderr gets one
+// plain status record per tick) and its stability measured. No daemon
+// involved; nothing is ever submitted.
 func runStatBench(cons *console.Console, threads, secs int, o *options) int {
 	st := &miner.State{}
 	blob := make([]byte, miner.MiniblockSize)
