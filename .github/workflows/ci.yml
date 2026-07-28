@@ -18,11 +18,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
-      - name: Linux deps (shellcheck + qemu, retried)
+      - name: Linux deps (shellcheck + qemu + arm64 glibc, retried)
         if: matrix.os == 'ubuntu-latest'
         run: |
           for i in 1 2 3; do sudo apt-get update -qq && break || sleep 10; done
-          sudo apt-get install -y -qq shellcheck qemu-user-static
+          sudo apt-get install -y -qq shellcheck qemu-user-static libc6-arm64-cross
       - name: Vet
         run: go vet ./...
       - name: Test
@@ -100,21 +100,38 @@ jobs:
           grep -q -- '--- PASS: TestHashPairMatchesHash' arm64-tests.log
           grep -q -- '--- PASS: TestPairDifferentialVsSingle' arm64-tests.log
           grep -q "pairHashAvailable=true" arm64-tests.log
-      - name: Cross-build android/arm64 + ELF contract
+      - name: Termux asset ELF contract + PIE execution proof
         if: matrix.os == 'ubuntu-latest'
         run: |
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -pgo=default.pgo -trimpath -o go-miner-android-arm64 .
-          # Termux execs via bionic's linker64, which refuses ET_EXEC: the
-          # asset must be a PIE with the bionic interpreter and no shared
-          # library needs. qemu cannot exec a bionic binary, so this ELF
-          # contract IS the gate — the qemu-run linux/arm64 build above
-          # proves the shared codegen.
-          readelf -h go-miner-android-arm64 | grep -q 'DYN'
-          readelf -l go-miner-android-arm64 | grep -q '/system/bin/linker64'
-          if readelf -d go-miner-android-arm64 | grep -qi needed; then
-            echo "unexpected DT_NEEDED in android binary" >&2
+          # The Termux asset is a linux-runtime PIE dressed for Android
+          # (GOOS=android without cgo hangs at startup: golang.org/issue/31343).
+          # Android's linker64 demands: ET_DYN, its own interpreter path,
+          # no DT_NEEDED, only RELATIVE relocations (symbol lookups start
+          # slowly: golang.org/issue/36028), and PT_TLS alignment >= 64.
+          # qemu cannot enforce any of that, so the readelf contract IS
+          # the gate.
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -pgo=default.pgo -buildmode=pie -trimpath \
+            -ldflags "-I /system/bin/linker64" -o go-miner-termux .
+          python3 scripts/patch-tls-align.py go-miner-termux
+          readelf -h go-miner-termux | grep -q 'DYN'
+          readelf -l go-miner-termux | grep -q '/system/bin/linker64'
+          if readelf -d go-miner-termux | grep -qi needed; then
+            echo "unexpected DT_NEEDED in Termux binary" >&2
             exit 1
           fi
+          if readelf -rW go-miner-termux | awk '/^[0-9a-f]/ && $3 != "R_AARCH64_RELATIVE"' | grep -q .; then
+            echo "non-RELATIVE dynamic relocations (slow under linker64)" >&2
+            exit 1
+          fi
+          tlsalign=$(readelf -lW go-miner-termux | awk '$1 == "TLS" {print $NF}')
+          if [ -n "$tlsalign" ] && [ "$((tlsalign))" -lt 64 ]; then
+            echo "PT_TLS underaligned for bionic: $tlsalign" >&2
+            exit 1
+          fi
+          # Execution proof of the same PIE link mode: a glibc-interp twin
+          # runs the full selftest under qemu with an arm64 loader.
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -pgo=default.pgo -buildmode=pie -trimpath -o go-miner-pie-twin .
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu ./go-miner-pie-twin --selftest
       - name: Package smoke
         if: runner.os == 'Linux'
         shell: bash

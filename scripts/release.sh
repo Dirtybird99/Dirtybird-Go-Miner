@@ -17,15 +17,19 @@ rm -rf dist
 mkdir -p dist
 
 # plat  GOOS     GOARCH  GOAMD64  exe-suffix  launcher
-# android-arm64 is the Termux asset: GOOS=android emits a PIE with
-# PT_INTERP=/system/bin/linker64 and no DT_NEEDED — modern Android execs
-# Termux binaries via bionic's linker64, which refuses the plain arm64
-# row's ET_EXEC (and a linux PIE would request the absent glibc loader).
+# android-arm64 is the Termux asset: a LINUX-runtime PIE dressed for
+# Android. GOOS=android is a trap without cgo — its runtime needs cgo for
+# the g-register TLS setup (golang.org/issue/31343) and hangs at startup
+# on real devices. Instead: linux runtime (pure-Go proven), -buildmode=pie
+# because Android execs Termux binaries via bionic's linker64 which
+# refuses ET_EXEC, PT_INTERP pointed at linker64, and PT_TLS realigned to
+# 64 (bionic aborts below that). qemu cannot exercise any of this — the
+# ELF gates in CI and the release smoke are the regression guards.
 matrix() {
   echo "win64         windows amd64 v3 .exe start.bat"
   echo "amd64         linux   amd64 v3 ''   script.sh"
   echo "arm64         linux   arm64 -  ''   script.sh"
-  echo "android-arm64 android arm64 -  ''   script.sh"
+  echo "android-arm64 linux   arm64 -  ''   script.sh"
   echo "macos-arm64   darwin  arm64 -  ''   script.sh"
 }
 
@@ -34,9 +38,18 @@ matrix | while read -r plat goos goarch amd64 suffix launcher; do
   stage="dist/${NAME}-${plat}-${VERSION}"
   mkdir -p "$stage"
   echo "== ${plat} (${goos}/${goarch}) =="
+  buildmode=""
+  ldextra=""
+  if [ "$plat" = "android-arm64" ]; then
+    buildmode="-buildmode=pie"
+    ldextra=" -I /system/bin/linker64"
+  fi
   env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
       $( [ "$amd64" = "v3" ] && echo "GOAMD64=v3" ) \
-      go build -mod=readonly $PGO -trimpath -ldflags "$LDFLAGS" -o "${stage}/go-miner${suffix}" .
+      go build -mod=readonly $PGO $buildmode -trimpath -ldflags "$LDFLAGS$ldextra" -o "${stage}/go-miner${suffix}" .
+  if [ "$plat" = "android-arm64" ]; then
+    python3 scripts/patch-tls-align.py "${stage}/go-miner"
+  fi
   cp config.json README.md LICENSE THIRD-PARTY-LICENSES "$stage/"
   cp internal/astrobwt/LICENSE-DERO.txt "$stage/"
   cp "$launcher" "$stage/"
