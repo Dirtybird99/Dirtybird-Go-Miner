@@ -97,12 +97,28 @@ jobs:
           bin="$RUNNER_TEMP/go-miner-arm64-smoke/Dirtybird-Go-Miner-arm64-$tag/go-miner"
           [ "$(qemu-aarch64-static "$bin" --version)" = "go-miner $tag" ]
           qemu-aarch64-static "$bin" --selftest
-          mode=$(tar -tvf "Dirtybird-Go-Miner-arm64-$tag.tar.gz" \
-            "Dirtybird-Go-Miner-arm64-$tag/termux-setup.sh" | awk '{print $1}')
-          case "$mode" in
-            -rwx*) ;;
-            *) echo "termux-setup.sh is not executable in the arm64 asset" >&2; exit 1 ;;
-          esac
+          # The android-arm64 asset (what the Termux installer downloads)
+          # cannot be executed by qemu-user (bionic), so its gate is the
+          # ELF contract: PIE + /system/bin/linker64 interpreter + no
+          # DT_NEEDED. Codegen is proven by the qemu selftest above.
+          mkdir "$RUNNER_TEMP/go-miner-android-smoke"
+          tar -xzf "Dirtybird-Go-Miner-android-arm64-$tag.tar.gz" \
+            -C "$RUNNER_TEMP/go-miner-android-smoke"
+          abin="$RUNNER_TEMP/go-miner-android-smoke/Dirtybird-Go-Miner-android-arm64-$tag/go-miner"
+          readelf -h "$abin" | grep -q 'DYN'
+          readelf -l "$abin" | grep -q '/system/bin/linker64'
+          if readelf -d "$abin" | grep -qi needed; then
+            echo "unexpected DT_NEEDED in android binary" >&2
+            exit 1
+          fi
+          for plat in arm64 android-arm64; do
+            mode=$(tar -tvf "Dirtybird-Go-Miner-$plat-$tag.tar.gz" \
+              "Dirtybird-Go-Miner-$plat-$tag/termux-setup.sh" | awk '{print $1}')
+            case "$mode" in
+              -rwx*) ;;
+              *) echo "termux-setup.sh is not executable in the $plat asset" >&2; exit 1 ;;
+            esac
+          done
 
       - name: Publish immutable-ready release
         env:

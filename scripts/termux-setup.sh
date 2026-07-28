@@ -18,7 +18,9 @@ DEFAULT_WALLET="dero1qyvuemd6z0uzsx5ufc99f0jhyzvvpysmrd2t3526ht7a9dfh7jve2qqt0vu
 INSTALL_DIR="$HOME/dirtybird-go-miner"
 BINARY_NAME="go-miner"
 VERSION_FILE=".installed_version"
-ARCHIVE_PREFIX="Dirtybird-Go-Miner-arm64-"
+# The android-arm64 asset is bionic-native (PIE, PT_INTERP=/system/bin/linker64);
+# Android refuses the plain arm64 asset's ET_EXEC via linker64.
+ARCHIVE_PREFIX="Dirtybird-Go-Miner-android-arm64-"
 ARCHIVE_SUFFIX=".tar.gz"
 
 # Daemon/pool menu (the family list).
@@ -207,7 +209,26 @@ fi
 BINARY_VERSION="$("./$BINARY_NAME" --version 2>/dev/null || true)"
 if [ -z "$BINARY_VERSION" ]; then
   err "Installed miner could not report its version."
-  err "Run this script with --update to repair the installation."
+  # Diagnose instead of leaving a blind failure (the family's hard-won
+  # lesson): rerun the probe with output captured and report exactly how
+  # it died, plus the device facts that decide ELF compatibility.
+  set +e
+  PROBE_OUT="$("./$BINARY_NAME" --version 2>&1)"
+  PROBE_CODE=$?
+  set -e
+  if [ "$PROBE_CODE" -gt 128 ]; then
+    err "Probe killed by signal $((PROBE_CODE - 128)) (exit $PROBE_CODE)."
+  else
+    err "Probe exit status: $PROBE_CODE."
+  fi
+  if [ -n "$PROBE_OUT" ]; then
+    printf '%s\n' "$PROBE_OUT" | tail -n 5 >&2
+  fi
+  if command -v getprop >/dev/null 2>&1; then
+    err "Device: abi=$(getprop ro.product.cpu.abi 2>/dev/null) sdk=$(getprop ro.build.version.sdk 2>/dev/null)"
+  fi
+  err "Run this script with --update to repair the installation, and report"
+  err "the lines above at https://github.com/$REPO/issues if it persists."
   exit 1
 fi
 if [ -n "$LATEST_TAG" ] && [ "$BINARY_VERSION" != "$BINARY_NAME $LATEST_TAG" ]; then

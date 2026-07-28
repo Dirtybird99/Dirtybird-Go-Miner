@@ -24,6 +24,7 @@ Grab the latest [release](https://github.com/Dirtybird99/Dirtybird-Go-Miner/rele
 | Windows x64 | `Dirtybird-Go-Miner-win64-vX.Y.Z.zip` |
 | Linux x64 | `Dirtybird-Go-Miner-amd64-vX.Y.Z.tar.gz` |
 | Linux arm64 | `Dirtybird-Go-Miner-arm64-vX.Y.Z.tar.gz` |
+| Android (Termux) | `Dirtybird-Go-Miner-android-arm64-vX.Y.Z.tar.gz` |
 | macOS (Apple Silicon) | `Dirtybird-Go-Miner-macos-arm64-vX.Y.Z.tar.gz` |
 | HiveOS / MMPOS | `dirtybird-go-miner-vX.Y.Z.hiveos_mmpos.amd64.tar.gz` |
 
