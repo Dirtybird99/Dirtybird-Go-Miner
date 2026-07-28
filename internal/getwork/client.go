@@ -40,6 +40,12 @@ type Client struct {
 	SendFails atomic.Uint64
 }
 
+func (c *Client) logf(format string, args ...interface{}) {
+	if c.Logf != nil {
+		c.Logf(format, args...)
+	}
+}
+
 func (c *Client) debugf(format string, args ...interface{}) {
 	if c.Debugf != nil {
 		c.Debugf(format, args...)
@@ -86,7 +92,7 @@ func (c *Client) Run(ctx context.Context) {
 		if err != nil {
 			c.errorf("Connection failed (%s): %v", c.HostPort(), err)
 		}
-		c.Logf("Retrying in %ds", int(backoff.Seconds()))
+		c.logf("Retrying in %ds", int(backoff.Seconds()))
 		select {
 		case <-ctx.Done():
 			return
@@ -112,7 +118,7 @@ func (c *Client) connectAndServe(ctx context.Context) (jobs uint64, err error) {
 		// unusable (Termux/Android has no /etc/resolv.conf) — dns.go.
 		NetDialContext: dialContextDNSFallback,
 	}
-	c.Logf("Connecting (%s)", c.HostPort())
+	c.logf("Connecting (%s)", c.HostPort())
 	dialStart := time.Now()
 	conn, _, err := dialer.DialContext(ctx, c.URL(), nil)
 	if err != nil {
@@ -122,18 +128,24 @@ func (c *Client) connectAndServe(ctx context.Context) (jobs uint64, err error) {
 
 	c.Connected.Store(true)
 	defer c.Connected.Store(false)
-	c.Logf("Connected (%s) (%d ms)", c.HostPort(), time.Since(dialStart).Milliseconds())
+	c.logf("Connected (%s) (%d ms)", c.HostPort(), time.Since(dialStart).Milliseconds())
 
 	// Writer: the sole goroutine writing data frames (gorilla allows exactly
 	// one concurrent writer; control frames from the default ping handler are
-	// safe alongside it).
+	// safe alongside it). quit is closed by the reader when the connection
+	// dies — without it the writer sits parked on ctx/Submits after a link
+	// drop, the reader blocks on writerDone, and the client never redials
+	// (with no pending submit, e.g. --dry-run, the stall was permanent).
 	writerDone := make(chan struct{})
+	quit := make(chan struct{})
 	go func() {
 		defer close(writerDone)
 		for {
 			select {
 			case <-ctx.Done():
 				conn.Close() // unblocks the reader
+				return
+			case <-quit:
 				return
 			case s, ok := <-c.Submits:
 				if !ok {
@@ -158,6 +170,7 @@ func (c *Client) connectAndServe(ctx context.Context) (jobs uint64, err error) {
 				c.debugf("connection to %s lost: %v", c.Endpoint, err)
 			}
 			conn.Close()
+			close(quit)
 			<-writerDone
 			return jobs, nil
 		}

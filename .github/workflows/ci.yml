@@ -18,6 +18,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+      - name: Linux deps (shellcheck + qemu, retried)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          for i in 1 2 3; do sudo apt-get update -qq && break || sleep 10; done
+          sudo apt-get install -y -qq shellcheck qemu-user-static
       - name: Vet
         run: go vet ./...
       - name: Test
@@ -68,8 +73,6 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
           while IFS= read -r script; do
             bash -n "$script"
           done < <(git ls-files '*.sh')
@@ -87,15 +90,15 @@ jobs:
       - name: arm64 selftest + hash gates (qemu)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-static
           qemu-aarch64-static ./go-miner-arm64 --selftest
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go test -c -o astrobwt-arm64.test ./internal/astrobwt
           qemu-aarch64-static ./astrobwt-arm64.test -test.run '^(TestHashPairMatchesHash|TestPairDifferentialVsSingle)$' -test.v > arm64-tests.log 2>&1 || { cat arm64-tests.log; exit 1; }
           cat arm64-tests.log
-          # A filter that matches nothing exits 0 — require real passes, and
+          # A filter that matches nothing exits 0 — assert each gate by name
+          # (a renamed test must fail here, not shrink the filter), and
           # require the hardware batch path (not the fallback) under qemu.
-          grep -q -- "--- PASS" arm64-tests.log
+          grep -q -- '--- PASS: TestHashPairMatchesHash' arm64-tests.log
+          grep -q -- '--- PASS: TestPairDifferentialVsSingle' arm64-tests.log
           grep -q "pairHashAvailable=true" arm64-tests.log
       - name: Package smoke
         if: runner.os == 'Linux'
@@ -115,3 +118,10 @@ jobs:
               *) echo "$script is not executable in $asset" >&2; exit 1 ;;
             esac
           done
+          arm=dist/Dirtybird-Go-Miner-arm64-v0.0.0.tar.gz
+          armdir=Dirtybird-Go-Miner-arm64-v0.0.0
+          mode=$(tar -tvf "$arm" "$armdir/termux-setup.sh" | awk '{print $1}')
+          case "$mode" in
+            -rwx*) ;;
+            *) echo "termux-setup.sh is not executable in $arm" >&2; exit 1 ;;
+          esac

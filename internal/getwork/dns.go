@@ -13,9 +13,11 @@ import (
 // fallbacks: the system lookup answers first.
 var fallbackDNS = []string{"1.1.1.1:53", "8.8.8.8:53"}
 
-// Per-lookup budget, so a black-holed UDP port 53 cannot eat the whole
-// websocket handshake budget.
-const lookupTimeout = 5 * time.Second
+// Per-lookup budget. Three resolvers run inside the websocket's 10s
+// handshake budget, so this must satisfy 3*lookupTimeout < handshake with
+// room left for TCP+TLS+upgrade — at 5s the third resolver was born expired
+// whenever the first two were black-holed.
+const lookupTimeout = 3 * time.Second
 
 type lookupFunc func(ctx context.Context, host string) ([]net.IPAddr, error)
 
@@ -27,15 +29,23 @@ func defaultLookups() []lookupFunc {
 	return lookups
 }
 
+// fallbackDial returns the resolver dial hook: it redirects every query to
+// the given DNS server while honoring the requested network — the resolver
+// retries over "tcp" after a truncated UDP answer, and forcing "udp" here
+// would make large RRsets unresolvable through the fallbacks.
+func fallbackDial(server string) func(ctx context.Context, network, address string) (net.Conn, error) {
+	return func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, server)
+	}
+}
+
 // fallbackLookup returns a lookup backed by a pure-Go resolver that dials the
 // given DNS server directly, bypassing /etc/resolv.conf.
 func fallbackLookup(server string) lookupFunc {
 	r := &net.Resolver{
 		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "udp", server)
-		},
+		Dial:     fallbackDial(server),
 	}
 	return r.LookupIPAddr
 }
@@ -65,6 +75,13 @@ func resolveHost(ctx context.Context, host string, lookups []lookupFunc) ([]net.
 	return nil, firstErr
 }
 
+// joinIPPort formats one resolved address for dialing. IPAddr.String keeps
+// the IPv6 zone (fe80::1%eth0) that ip.IP.String would drop — link-local
+// endpoints stopped working without it.
+func joinIPPort(ip net.IPAddr, port string) string {
+	return net.JoinHostPort(ip.String(), port)
+}
+
 // dialContextDNSFallback is the websocket dialer's NetDialContext: IP-literal
 // hosts dial straight through; hostnames resolve via the system resolver
 // first, then the public fallbacks, and each address is tried until one
@@ -85,7 +102,7 @@ func dialContextDNSFallback(ctx context.Context, network, addr string) (net.Conn
 	}
 	var firstErr error
 	for _, ip := range addrs {
-		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		conn, err := d.DialContext(ctx, network, joinIPPort(ip, port))
 		if err == nil {
 			return conn, nil
 		}

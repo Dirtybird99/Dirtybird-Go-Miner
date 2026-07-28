@@ -67,6 +67,7 @@ TEXT ·sha256BlocksARM64(SB), NOSPLIT, $0-24
 	MOVD	state+0(FP), R0
 	MOVD	p+8(FP), R1
 	MOVD	nblocks+16(FP), R5
+	CBZ	R5, done1 // do-while body would otherwise run ~2^64 blocks
 	VLD1	(R0), [V0.S4, V1.S4]
 
 loop1:
@@ -102,6 +103,7 @@ loop1:
 	CBNZ	R5, loop1
 
 	VST1	[V0.S4, V1.S4], (R0)
+done1:
 	RET
 
 // func sha256Blocks2ARM64(state0 *[8]uint32, p0 *byte, state1 *[8]uint32, p1 *byte, nblocks int)
@@ -111,6 +113,7 @@ TEXT ·sha256Blocks2ARM64(SB), NOSPLIT, $0-40
 	MOVD	state1+16(FP), R2
 	MOVD	p1+24(FP), R3
 	MOVD	nblocks+32(FP), R5
+	CBZ	R5, done2 // do-while body would otherwise run ~2^64 blocks
 	VLD1	(R0), [V0.S4, V1.S4]
 	VLD1	(R2), [V20.S4, V21.S4]
 
@@ -157,6 +160,7 @@ loop2:
 
 	VST1	[V0.S4, V1.S4], (R0)
 	VST1	[V20.S4, V21.S4], (R2)
+done2:
 	RET
 
 DATA	·sha256KARM64+0x00(SB)/4, $0x428a2f98

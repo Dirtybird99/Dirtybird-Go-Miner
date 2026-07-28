@@ -29,6 +29,17 @@ jobs:
   bench:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
+    defaults:
+      run:
+        # GitHub's implicit shell is `bash -e {0}` WITHOUT pipefail, which
+        # would let `go test ... | tee` mask a failing gate behind tee's
+        # exit 0. Explicit bash turns on -o pipefail.
+        shell: bash
+    env:
+      MODE: ${{ inputs.mode }}
+      BENCHTIME: ${{ inputs.benchtime }}
+      COUNT: ${{ inputs.count }}
+      SECS: ${{ inputs.secs }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -44,6 +55,12 @@ jobs:
           go test ./internal/astrobwt -count=1 -v \
             -run '^(TestKAT|TestDifferentialVsReference|TestHashPairMatchesHash|TestPairDifferentialVsSingle)$' \
             | tee gates.txt
+          # Each gate asserted by name: a renamed test must fail here, not
+          # silently shrink the filter.
+          grep -q -- '--- PASS: TestKAT' gates.txt
+          grep -q -- '--- PASS: TestDifferentialVsReference' gates.txt
+          grep -q -- '--- PASS: TestHashPairMatchesHash' gates.txt
+          grep -q -- '--- PASS: TestPairDifferentialVsSingle' gates.txt
           grep -q 'pairHashAvailable=true' gates.txt # hardware batch path must be live
       - name: Micro bench (single vs pair)
         if: inputs.mode != 'smoke'
@@ -52,15 +69,16 @@ jobs:
           # ns/op against 2x BenchmarkHashV114 ns/op.
           go test ./internal/astrobwt -run - \
             -bench '^(BenchmarkHashV114|BenchmarkHashPairV114)$' \
-            -benchtime "${{ inputs.benchtime }}" -count "${{ inputs.count }}" | tee bench.txt
+            -benchtime "$BENCHTIME" -count "$COUNT" | tee bench.txt
       - name: Sustained pair vs single
         if: inputs.mode == 'pair'
         run: |
-          go build -trimpath -o go-miner-arm .
-          ./go-miner-arm -sustained -secs "${{ inputs.secs }}" -t "$(nproc)" -pair=false | tee sustained-single.txt
+          go build -pgo=default.pgo -trimpath -o go-miner-arm .
+          ./go-miner-arm -sustained -secs "$SECS" -t "$(nproc)" -pair=false | tee sustained-single.txt
           sleep 30
-          ./go-miner-arm -sustained -secs "${{ inputs.secs }}" -t "$(nproc)" -pair=true | tee sustained-pair.txt
+          ./go-miner-arm -sustained -secs "$SECS" -t "$(nproc)" -pair=true | tee sustained-pair.txt
       - uses: actions/upload-artifact@v4
+        if: always() # partial logs are the post-mortem when a gate fails
         with:
           name: arm64-bench-${{ inputs.mode }}
           path: |
@@ -68,3 +86,4 @@ jobs:
             bench.txt
             sustained-*.txt
           if-no-files-found: ignore
+          overwrite: true
