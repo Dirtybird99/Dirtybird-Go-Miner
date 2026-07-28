@@ -386,6 +386,29 @@ func (w *hashrateWindow) average(at time.Time, hashes uint64) float64 {
 // byte-for-byte the zig miner's reporter()); a narrowing terminal steps down
 // the five-tier ladder in status.go. A redirected stream gets the plain FULL
 // line as one newline record per tick.
+// statusRowHasSomethingToSay reports whether the live row has anything true to
+// say this tick.
+//
+// A displayed 0.00 KH/s is not a rare fault — it is what every launch prints.
+// getwork sends no job at connect time (the first arrives on a dispatch tick
+// ~500ms later), so dial + TLS + upgrade + first job is ~1-3s of genuine zero
+// and the first tick at t=1s lands inside it. Reconnect backoff is the same
+// story, repeatedly, on a flaky link.
+//
+// No DERO miner in the ecosystem shows a live zero. tnn-miner suppresses its
+// row two ways ("if (!isConnected) return 1;" plus a first-hashrate gate
+// commented "Mining hasn't started yet - don't print status, just accumulate
+// stats"); 8lecramm's C miner calls print_status only from inside the worker
+// thread, after the job check; netrunner's GUI shows a grey "---" placeholder
+// and a separate "Offline" label.
+//
+// Suppressing beats printing a reason because the transitions are already
+// logged, and Console.Logf emits "\r\x1b[K" first — so a log line erases
+// whatever row is on screen instead of leaving a stale one behind.
+func statusRowHasSomethingToSay(connected bool, epoch uint64) bool {
+	return connected && epoch > 0
+}
+
 func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, client *getwork.Client, o *options) {
 	start := time.Now()
 	startHashes := st.TotalHashes.Load()
@@ -421,6 +444,19 @@ func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, cli
 		rate := rates.sample(now, cur)
 		avg := rates.average(now, cur)
 		up := int(now.Sub(start).Seconds())
+
+		// Sampling above runs on every tick, printed or not: skipping it would
+		// let the ~10s window go stale and the rate would read wrong for ~10s
+		// after mining resumes.
+		//
+		// Only the interactive row is suppressed. The redirected record keeps
+		// flowing because HiveOS h-run.sh consumes it (see Console.Status), and
+		// a run of 0.00 records during an outage is the correct report there
+		// while a gap is not.
+		if cons.VT() && !statusRowHasSomethingToSay(client.Connected.Load(), st.Epoch()) {
+			continue
+		}
+
 		f := snapshotStatus(st, client, rate, avg, up, o.verbose)
 		plain := renderTier(tierFull, console.Plain(), f).String()
 		terminal := plain

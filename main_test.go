@@ -162,3 +162,26 @@ func TestRunSetupDefaultsAndCustomRetry(t *testing.T) {
 		}
 	})
 }
+
+func TestStatusRowStaysSilentUntilThereIsSomethingToSay(t *testing.T) {
+	// Every launch: not connected, no job. This is the tick that used to print
+	// "[DIRTYBIRD] 0.00 KH/s (0.00 KH/s avg) | Height:0 | ..." on every run.
+	if statusRowHasSomethingToSay(false, 0) {
+		t.Error("printed a row before connecting")
+	}
+	// Connected, but getwork has not pushed a job yet — workers are still
+	// parked, so the rate is genuinely zero.
+	if statusRowHasSomethingToSay(true, 0) {
+		t.Error("printed a row before the first job arrived")
+	}
+	// Mining.
+	if !statusRowHasSomethingToSay(true, 1) {
+		t.Error("suppressed the row while actually mining")
+	}
+	// Dropped mid-run: a job was seen earlier so the epoch stays high, but
+	// workers are parked for the whole backoff. Having once had a job must not
+	// keep the row alive.
+	if statusRowHasSomethingToSay(false, 5) {
+		t.Error("kept the row alive across a disconnect")
+	}
+}
