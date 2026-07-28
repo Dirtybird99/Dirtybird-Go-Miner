@@ -100,6 +100,21 @@ jobs:
           grep -q -- '--- PASS: TestHashPairMatchesHash' arm64-tests.log
           grep -q -- '--- PASS: TestPairDifferentialVsSingle' arm64-tests.log
           grep -q "pairHashAvailable=true" arm64-tests.log
+      - name: Cross-build android/arm64 + ELF contract
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -pgo=default.pgo -trimpath -o go-miner-android-arm64 .
+          # Termux execs via bionic's linker64, which refuses ET_EXEC: the
+          # asset must be a PIE with the bionic interpreter and no shared
+          # library needs. qemu cannot exec a bionic binary, so this ELF
+          # contract IS the gate — the qemu-run linux/arm64 build above
+          # proves the shared codegen.
+          readelf -h go-miner-android-arm64 | grep -q 'DYN'
+          readelf -l go-miner-android-arm64 | grep -q '/system/bin/linker64'
+          if readelf -d go-miner-android-arm64 | grep -qi needed; then
+            echo "unexpected DT_NEEDED in android binary" >&2
+            exit 1
+          fi
       - name: Package smoke
         if: runner.os == 'Linux'
         shell: bash
@@ -118,10 +133,12 @@ jobs:
               *) echo "$script is not executable in $asset" >&2; exit 1 ;;
             esac
           done
-          arm=dist/Dirtybird-Go-Miner-arm64-v0.0.0.tar.gz
-          armdir=Dirtybird-Go-Miner-arm64-v0.0.0
-          mode=$(tar -tvf "$arm" "$armdir/termux-setup.sh" | awk '{print $1}')
-          case "$mode" in
-            -rwx*) ;;
-            *) echo "termux-setup.sh is not executable in $arm" >&2; exit 1 ;;
-          esac
+          for plat in arm64 android-arm64; do
+            arm=dist/Dirtybird-Go-Miner-$plat-v0.0.0.tar.gz
+            armdir=Dirtybird-Go-Miner-$plat-v0.0.0
+            mode=$(tar -tvf "$arm" "$armdir/termux-setup.sh" | awk '{print $1}')
+            case "$mode" in
+              -rwx*) ;;
+              *) echo "termux-setup.sh is not executable in $arm" >&2; exit 1 ;;
+            esac
+          done

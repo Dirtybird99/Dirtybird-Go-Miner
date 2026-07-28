@@ -17,11 +17,16 @@ rm -rf dist
 mkdir -p dist
 
 # plat  GOOS     GOARCH  GOAMD64  exe-suffix  launcher
+# android-arm64 is the Termux asset: GOOS=android emits a PIE with
+# PT_INTERP=/system/bin/linker64 and no DT_NEEDED — modern Android execs
+# Termux binaries via bionic's linker64, which refuses the plain arm64
+# row's ET_EXEC (and a linux PIE would request the absent glibc loader).
 matrix() {
-  echo "win64        windows amd64 v3 .exe start.bat"
-  echo "amd64        linux   amd64 v3 ''   script.sh"
-  echo "arm64        linux   arm64 -  ''   script.sh"
-  echo "macos-arm64  darwin  arm64 -  ''   script.sh"
+  echo "win64         windows amd64 v3 .exe start.bat"
+  echo "amd64         linux   amd64 v3 ''   script.sh"
+  echo "arm64         linux   arm64 -  ''   script.sh"
+  echo "android-arm64 android arm64 -  ''   script.sh"
+  echo "macos-arm64   darwin  arm64 -  ''   script.sh"
 }
 
 matrix | while read -r plat goos goarch amd64 suffix launcher; do
@@ -35,11 +40,13 @@ matrix | while read -r plat goos goarch amd64 suffix launcher; do
   cp config.json README.md LICENSE THIRD-PARTY-LICENSES "$stage/"
   cp internal/astrobwt/LICENSE-DERO.txt "$stage/"
   cp "$launcher" "$stage/"
-  if [ "$plat" = "arm64" ]; then
+  case "$plat" in
+  arm64|android-arm64)
     # Termux users get the installer offline too.
     cp scripts/termux-setup.sh "$stage/"
     chmod 0755 "$stage/termux-setup.sh"
-  fi
+    ;;
+  esac
   if [ "$goos" = "windows" ]; then
     (cd dist && zip -qr "${NAME}-${plat}-${VERSION}.zip" "${NAME}-${plat}-${VERSION}")
   else
