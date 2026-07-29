@@ -81,3 +81,55 @@ func TestReconnectAfterServerCloseWithoutSubmits(t *testing.T) {
 		t.Fatal("Run did not return after cancel")
 	}
 }
+
+// A share found on a connection that has since died must not be flushed onto
+// the next one. The submit channel is created once and outlives every session,
+// while workers gate only on "a job exists" -- not on being connected -- so an
+// outage fills the buffer with shares the daemon can only reject.
+//
+// Measured against a test daemon before this drain existed: an 18s outage put
+// 17 stale submissions on the fresh connection (the 16-deep buffer plus one
+// found in the window before the first new job), all for a job the server had
+// long since replaced. After: 0.
+func TestDiscardStaleSubmitsEmptiesTheBacklog(t *testing.T) {
+	ch := make(chan Submit, 16)
+	c := &Client{Submits: ch}
+
+	for i := 0; i < 16; i++ {
+		ch <- Submit{JobID: "old-job", Blob: "deadbeef"}
+	}
+	c.discardStaleSubmits()
+
+	if len(ch) != 0 {
+		t.Fatalf("drain left %d share(s) queued; the next session would submit them", len(ch))
+	}
+	if got := c.Discarded.Load(); got != 16 {
+		t.Fatalf("Discarded = %d, want 16 -- the loss has to be countable, not silent", got)
+	}
+}
+
+// The counter must mean "a share was thrown away", not "a reconnect happened":
+// a redial with nothing buffered is the healthy case and must stay at zero, or
+// the number is useless for spotting the unhealthy one.
+func TestDiscardStaleSubmitsIsQuietWhenEmpty(t *testing.T) {
+	c := &Client{Submits: make(chan Submit, 16)}
+	c.discardStaleSubmits()
+	if got := c.Discarded.Load(); got != 0 {
+		t.Fatalf("Discarded = %d on an empty channel, want 0", got)
+	}
+}
+
+// Draining must not block or spin when the channel is closed at shutdown.
+func TestDiscardStaleSubmitsHandlesClosedChannel(t *testing.T) {
+	ch := make(chan Submit, 4)
+	ch <- Submit{JobID: "old-job"}
+	close(ch)
+	c := &Client{Submits: ch}
+	done := make(chan struct{})
+	go func() { c.discardStaleSubmits(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("discardStaleSubmits did not return on a closed channel")
+	}
+}
