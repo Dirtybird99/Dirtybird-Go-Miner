@@ -93,6 +93,12 @@ Run `go-miner -h` for the advanced benchmarking/tuning flags. Reproducible
 performance methodology and research notes live in [BENCHMARKING.md](BENCHMARKING.md)
 and [PERF_RESEARCH.md](PERF_RESEARCH.md).
 
+On Windows amd64 systems with up to 64 logical CPUs, topology-aware
+P-core-first pinning is on by default; `--pin=false` opts out. Larger Windows
+systems and other platforms stay unpinned unless requested. `--high` remains
+opt-in. The x2 `--pair` path remains opt-in on amd64 and defaults on only where
+the ARM SHA2 path has a measured win.
+
 ## Build from source
 
 Go 1.25+:
@@ -110,23 +116,25 @@ release asset set.
 
 ## Correctness
 
-- Unconditional startup KAT: `pow("a")` must match the family vector or the
-  miner refuses to run.
+- Unconditional startup KAT: `pow("a")` must match through the selected SA
+  backend or the miner refuses to run. `--selftest` covers both SAIS and V114.
 - `go test ./...` runs the gates: 11 hash vectors, differential fuzz against
   the verbatim derohe reference (`internal/refpow`), a 5,000-hash v114-vs-SAIS
   differential (an opt-in 1,000,008-hash version gates releases), zero-allocation
-  checks on the hash hot path, difficulty-check fuzz against a big.Int oracle,
-  and race-detector runs on the worker pipeline.
+  checks on the hash hot path, and difficulty-check fuzz against a big.Int oracle.
+  Release CI separately runs the worker pipeline under `go test -race`.
 - The fast SA declines gracefully: any input it can't handle falls back to the
   SAIS reference for that hash.
 
 ## Performance
 
 Laptop hashrates are thermal-state dependent — compare miners only in the same
-session, over several minutes. Same-session on an i7-13700HX (20 threads,
-pinned, HIGH priority, idle machine): **~12.0 KH/s**, within ~10% of the
-family's clang-built Zig miner on the same box (the remaining gap is LLVM
-codegen; measured, not guessed). Machine-specific, not a universal claim.
+session, over several minutes. The 2026-08-03 diagnostic audit on the
+i7-13700HX still places Go about **21-23% behind** the active local Zig x2
+build at 1 and 20 threads; this is not an official promoted score. The old
+“within ~10%” claim was not reproducible and has been removed. The exact
+profiles, rejected candidates, and evidence boundary are in
+[PERF_RESEARCH.md](PERF_RESEARCH.md).
 
 ## License
 
