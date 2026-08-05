@@ -70,3 +70,53 @@ func TestWorkersUnderJobChurn(t *testing.T) {
 	t.Logf("hashes=%d submitted=%d drained=%d epoch=%d",
 		st.TotalHashes.Load(), st.Submitted.Load(), submitted.Load(), st.Epoch())
 }
+
+func TestWorkerStopsWhileJobIsInvalid(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode")
+	}
+	st := &State{}
+	j := validJob()
+	j.Difficultyuint64 = 1 << 62
+	if _, err := st.SetJob(j); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		Run(ctx, 0, st, make(chan getwork.Submit, 1), nil, astrobwt.BackendV114, false)
+		close(done)
+	}()
+	waitForHashes := func(after uint64) uint64 {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			if n := st.TotalHashes.Load(); n > after {
+				return n
+			}
+			select {
+			case <-deadline:
+				t.Fatalf("hash count did not advance past %d", after)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+	waitForHashes(0)
+	st.Invalidate()
+	time.Sleep(200 * time.Millisecond) // let the in-flight hash and local counter flush finish
+	paused := st.TotalHashes.Load()
+	time.Sleep(200 * time.Millisecond)
+	if got := st.TotalHashes.Load(); got != paused {
+		t.Fatalf("worker hashed invalid work: count advanced from %d to %d", paused, got)
+	}
+	if changed, err := st.SetJob(j); err != nil || !changed {
+		t.Fatalf("reactivate identical job: changed=%v err=%v", changed, err)
+	}
+	waitForHashes(paused)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not stop after cancellation")
+	}
+}

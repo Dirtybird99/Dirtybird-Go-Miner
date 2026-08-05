@@ -35,12 +35,10 @@ func Run(ctx context.Context, tid int, st *State, submits chan<- getwork.Submit,
 
 	for ctx.Err() == nil {
 		blob, jobid, target, epoch := st.Job()
-		if epoch == 0 { // no job yet
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(50 * time.Millisecond):
-			}
+		if epoch == 0 || !st.Active() { // no live job yet
+			// ponytail: bounded cancellation latency avoids allocating a timer on
+			// every outage poll; use a state-change channel if 50 ms ever matters.
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 
@@ -51,7 +49,7 @@ func Run(ctx context.Context, tid int, st *State, submits chan<- getwork.Submit,
 
 		submit := func(work *[48]byte) {
 			select {
-			case submits <- getwork.Submit{JobID: jobid, Blob: hex.EncodeToString(work[:])}:
+			case submits <- getwork.Submit{JobID: jobid, Blob: hex.EncodeToString(work[:]), Epoch: epoch}:
 				st.Submitted.Add(1)
 			default: // mailbox full: drop rather than stall the hot loop
 				st.Stale.Add(1)
@@ -60,7 +58,7 @@ func Run(ctx context.Context, tid int, st *State, submits chan<- getwork.Submit,
 
 		var nonce uint32
 		var local uint64
-		for st.Epoch() == epoch && ctx.Err() == nil {
+		for st.Active() && st.Epoch() == epoch && ctx.Err() == nil {
 			if pair {
 				nonce++
 				binary.BigEndian.PutUint32(workA[43:47], nonce)
@@ -68,10 +66,10 @@ func Run(ctx context.Context, tid int, st *State, submits chan<- getwork.Submit,
 				binary.BigEndian.PutUint32(workB[43:47], nonce)
 				powA, powB := h.HashPair(workA[:], workB[:])
 				local += 2
-				if MeetsTarget(&powA, &target) && st.Epoch() == epoch {
+				if MeetsTarget(&powA, &target) && st.Active() && st.Epoch() == epoch {
 					submit(&workA)
 				}
-				if MeetsTarget(&powB, &target) && st.Epoch() == epoch {
+				if MeetsTarget(&powB, &target) && st.Active() && st.Epoch() == epoch {
 					submit(&workB)
 				}
 			} else {
@@ -79,7 +77,7 @@ func Run(ctx context.Context, tid int, st *State, submits chan<- getwork.Submit,
 				binary.BigEndian.PutUint32(workA[43:47], nonce)
 				pow := h.Hash(workA[:])
 				local++
-				if MeetsTarget(&pow, &target) && st.Epoch() == epoch {
+				if MeetsTarget(&pow, &target) && st.Active() && st.Epoch() == epoch {
 					submit(&workA)
 				}
 			}

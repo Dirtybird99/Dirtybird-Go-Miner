@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"go-miner/internal/astrobwt"
 	"go-miner/internal/config"
 )
 
@@ -22,6 +24,49 @@ func TestValidSAName(t *testing.T) {
 	for _, name := range []string{"", "SAIS", "libsais", "nope"} {
 		if validSAName(name) {
 			t.Fatalf("%q should be invalid", name)
+		}
+	}
+}
+
+func TestKATCoversMiningBackends(t *testing.T) {
+	for name, backend := range map[string]astrobwt.Backend{
+		"sais": astrobwt.BackendSAIS,
+		"v114": astrobwt.BackendV114,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := kat(backend); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if got := (&options{}).backend(); got != astrobwt.BackendV114 {
+		t.Fatalf("default mining backend = %v, want V114", got)
+	}
+}
+
+func TestDefaultPinModeMatchesPlatform(t *testing.T) {
+	want := runtime.GOOS == "windows" && runtime.GOARCH == "amd64" && runtime.NumCPU() <= 64
+	if got := defaultPinMode(); got != want {
+		t.Fatalf("defaultPinMode() = %v, want %v", got, want)
+	}
+}
+
+func TestNormalizedThreadCount(t *testing.T) {
+	wantDefault := runtime.NumCPU()
+	if wantDefault > maxThreads {
+		wantDefault = maxThreads
+	}
+	for _, tc := range []struct {
+		in, want int
+	}{
+		{-1, wantDefault},
+		{0, wantDefault},
+		{1, 1},
+		{maxThreads, maxThreads},
+		{maxThreads + 1, maxThreads},
+	} {
+		if got := normalizedThreadCount(tc.in); got != tc.want {
+			t.Errorf("normalizedThreadCount(%d) = %d, want %d", tc.in, got, tc.want)
 		}
 	}
 }

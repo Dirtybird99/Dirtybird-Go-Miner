@@ -34,6 +34,7 @@ type statusFields struct {
 	Verbose    bool
 	Submitted  uint64
 	Stale      uint64
+	Discarded  uint64
 	SendFails  uint64
 }
 
@@ -50,6 +51,7 @@ func snapshotStatus(st *miner.State, client *getwork.Client, rate, avg float64, 
 		Verbose:    verbose,
 		Submitted:  st.Submitted.Load(),
 		Stale:      st.Stale.Load(),
+		Discarded:  client.Discarded.Load(),
 		SendFails:  client.SendFails.Load(),
 	}
 }
@@ -95,8 +97,8 @@ func renderTier(tier int, p console.Palette, f statusFields) *console.LineBuf {
 		field(p.Time, uptime, "") // legacy trailing Text escape
 		lb.Esc(p.Reset)
 		if f.Verbose {
-			lb.Txt(fmt.Sprintf(" | funnel submitted:%d acc:%d rej:%d stale:%d sendfail:%d",
-				f.Submitted, f.MiniBlocks, f.Rejected, f.Stale, f.SendFails))
+			lb.Txt(fmt.Sprintf(" | funnel submitted:%d acc:%d rej:%d stale:%d discarded:%d sendfail:%d",
+				f.Submitted, f.MiniBlocks, f.Rejected, f.Stale, f.Discarded, f.SendFails))
 		}
 
 	case tierMedium: // abbreviated labels, every field kept

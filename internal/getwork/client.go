@@ -22,11 +22,13 @@ const (
 // Client maintains one GETWORK websocket connection to a DERO daemon or pool,
 // delivering pushed jobs via OnJob and draining Submits into the socket.
 type Client struct {
-	Endpoint string // [ws://|wss://]host:port ; bare host:port implies wss
-	Wallet   string
-	OnJob    func(Job)     // called from the reader goroutine
-	Submits  <-chan Submit // drained by the writer goroutine
-	Logf     func(format string, args ...interface{})
+	Endpoint     string // [ws://|wss://]host:port ; bare host:port implies wss
+	Wallet       string
+	OnJob        func(Job) bool    // called from the reader; true means valid work
+	OnDisconnect func()            // called once when an established session ends
+	SubmitValid  func(Submit) bool // checked immediately before a socket write
+	Submits      <-chan Submit     // drained by the writer goroutine
+	Logf         func(format string, args ...interface{})
 	// Errorf receives connection-failure records. Unlike Debugf chatter these
 	// are always-on in the family CLIs (a phone user cannot tell a slow
 	// handshake from a hang without them). May be nil.
@@ -46,28 +48,18 @@ type Client struct {
 // discardStaleSubmits empties the submit channel before a new session starts
 // using it.
 //
-// The channel is created once (main.go) and outlives every connection, while
-// workers gate only on "a job exists" — not on being connected. So during an
-// outage they keep mining the last job and keep filling the buffer, and every
-// one of those shares belongs to a session that is gone. Without this they are
-// flushed onto the *fresh* connection the moment it comes up: reproduced
-// against a test daemon, a share was accepted into the queue and submitted 12
-// seconds later on a different connection, against a job the server had long
-// since replaced.
-//
-// Submit carries no epoch, so the writer cannot tell a stale entry from a live
-// one — draining at the session boundary is what makes the distinction, and it
-// is where the whole accumulated backlog is discarded in one place. Rust does
-// the same thing at the same point (main.rs, "drop shares queued while
-// disconnected — their jobs are stale anyway"); C++ and Zig are covered instead
-// by a per-item epoch re-check on dequeue.
-//
-// This does not close the window entirely: workers keep mining the old job
-// until the first push of the new session arrives (~500ms), so a share found in
-// that gap is still submitted stale. That residue is bounded by job cadence
-// rather than by reconnect backoff, which is the part that actually mattered.
+// The channel is created once (main.go) and outlives every connection. State is
+// invalidated when a session ends, but shares already buffered still belong to
+// the dead session, so drain them before the next writer starts. SubmitValid's
+// epoch check closes the remaining enqueue-after-drain race.
 func (c *Client) discardStaleSubmits() {
 	n := uint64(0)
+	defer func() {
+		if n > 0 {
+			c.Discarded.Add(n)
+			c.debugf("discarded %d share(s) queued while disconnected", n)
+		}
+	}()
 	for {
 		select {
 		case _, ok := <-c.Submits:
@@ -76,13 +68,18 @@ func (c *Client) discardStaleSubmits() {
 			}
 			n++
 		default:
-			if n > 0 {
-				c.Discarded.Add(n)
-				c.debugf("discarded %d share(s) queued while disconnected", n)
-			}
 			return
 		}
 	}
+}
+
+func (c *Client) submitIsCurrent(s Submit) bool {
+	if c.SubmitValid == nil || c.SubmitValid(s) {
+		return true
+	}
+	c.Discarded.Add(1)
+	c.debugf("discarded stale share for job %s", s.JobID)
+	return false
 }
 
 func (c *Client) logf(format string, args ...interface{}) {
@@ -172,7 +169,12 @@ func (c *Client) connectAndServe(ctx context.Context) (jobs uint64, err error) {
 	defer conn.Close()
 
 	c.Connected.Store(true)
-	defer c.Connected.Store(false)
+	defer func() {
+		c.Connected.Store(false)
+		if c.OnDisconnect != nil {
+			c.OnDisconnect()
+		}
+	}()
 	c.logf("Connected (%s) (%d ms)", c.HostPort(), time.Since(dialStart).Milliseconds())
 
 	// Anything still buffered was found on the previous connection. Drain it
@@ -201,6 +203,9 @@ func (c *Client) connectAndServe(ctx context.Context) (jobs uint64, err error) {
 				if !ok {
 					return
 				}
+				if !c.submitIsCurrent(s) {
+					continue
+				}
 				conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 				if err := conn.WriteJSON(s); err != nil {
 					c.SendFails.Add(1)
@@ -224,7 +229,8 @@ func (c *Client) connectAndServe(ctx context.Context) (jobs uint64, err error) {
 			<-writerDone
 			return jobs, nil
 		}
-		jobs++
-		c.OnJob(j)
+		if c.OnJob == nil || c.OnJob(j) {
+			jobs++
+		}
 	}
 }

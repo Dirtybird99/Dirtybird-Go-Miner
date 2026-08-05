@@ -45,11 +45,13 @@ func TestReconnectAfterServerCloseWithoutSubmits(t *testing.T) {
 	defer srv.Close()
 
 	jobs := make(chan Job, 4)
+	disconnected := make(chan struct{}, 4)
 	client := &Client{
-		Endpoint: "ws://" + srv.Listener.Addr().String(),
-		Wallet:   "w",
-		Submits:  make(chan Submit), // never fed: the stall precondition
-		OnJob:    func(j Job) { jobs <- j },
+		Endpoint:     "ws://" + srv.Listener.Addr().String(),
+		Wallet:       "w",
+		Submits:      make(chan Submit), // never fed: the stall precondition
+		OnJob:        func(j Job) bool { jobs <- j; return true },
+		OnDisconnect: func() { disconnected <- struct{}{} },
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -72,6 +74,14 @@ func TestReconnectAfterServerCloseWithoutSubmits(t *testing.T) {
 		}
 	}
 	waitJob("job-1")
+	select {
+	case <-disconnected:
+		if client.Connected.Load() {
+			t.Fatal("disconnect callback ran while Connected was still true")
+		}
+	case <-ctx.Done():
+		t.Fatal("disconnect callback did not run after the first session closed")
+	}
 	waitJob("job-2")
 
 	cancel()
@@ -131,5 +141,21 @@ func TestDiscardStaleSubmitsHandlesClosedChannel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("discardStaleSubmits did not return on a closed channel")
+	}
+	if got := c.Discarded.Load(); got != 1 {
+		t.Fatalf("Discarded = %d, want 1", got)
+	}
+}
+
+func TestSubmitValidationDropsStaleEpoch(t *testing.T) {
+	c := &Client{SubmitValid: func(s Submit) bool { return s.Epoch == 7 }}
+	if !c.submitIsCurrent(Submit{Epoch: 7}) {
+		t.Fatal("current submit was rejected")
+	}
+	if c.submitIsCurrent(Submit{JobID: "old", Epoch: 6}) {
+		t.Fatal("stale submit was accepted")
+	}
+	if got := c.Discarded.Load(); got != 1 {
+		t.Fatalf("Discarded = %d, want 1", got)
 	}
 }

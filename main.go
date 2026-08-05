@@ -74,6 +74,20 @@ func defaultPairMode() bool {
 	return runtime.GOARCH == "arm64" && astrobwt.PairHashSupported()
 }
 
+func defaultPinMode() bool {
+	return runtime.GOOS == "windows" && runtime.GOARCH == "amd64" && runtime.NumCPU() <= 64
+}
+
+func normalizedThreadCount(n int) int {
+	if n <= 0 {
+		n = runtime.NumCPU()
+	}
+	if n > maxThreads {
+		n = maxThreads
+	}
+	return n
+}
+
 func parseFlags() *options {
 	o := &options{}
 	flag.StringVar(&o.daemon, "d", "", "")
@@ -92,7 +106,7 @@ func parseFlags() *options {
 	flag.BoolVar(&o.selftest, "selftest", false, "")
 	flag.BoolVar(&o.setup, "setup", false, "")
 	flag.BoolVar(&o.dryRun, "dry-run", false, "")
-	flag.BoolVar(&o.pin, "pin", false, "")
+	flag.BoolVar(&o.pin, "pin", defaultPinMode(), "")
 	flag.BoolVar(&o.high, "high", false, "")
 	flag.BoolVar(&o.pair, "pair", defaultPairMode(), "")
 	flag.StringVar(&o.saName, "sa", "v114", "")
@@ -127,6 +141,8 @@ advanced (benchmarking/tuning):
   --sustained --secs N   fixed-window all-threads benchmark
   --statbench --secs N    real-worker status-line stability benchmark
   --pin / --high         P-core-first thread pinning / HIGH process priority
+                         (pin defaults on for Windows amd64 up to 64 logical CPUs;
+                          --pin=false disables)
   --pair                 2 nonces/thread with a 2-way batched final hash
                          (default on arm64 with SHA2; --pair=false disables)
   --sa v114|sais         suffix-array backend (default v114)
@@ -151,12 +167,7 @@ func (o *options) resolve(f *config.File) {
 	if o.threads == 0 && f != nil && f.Threads != nil {
 		o.threads = *f.Threads
 	}
-	if o.threads <= 0 {
-		o.threads = runtime.NumCPU()
-	}
-	if o.threads > maxThreads {
-		o.threads = maxThreads
-	}
+	o.threads = normalizedThreadCount(o.threads)
 }
 
 func main() { os.Exit(run()) }
@@ -179,7 +190,7 @@ func run() int {
 		return 1
 	}
 	cons := console.New()
-	if err := kat(); err != nil {
+	if err := kat(o.backend()); err != nil {
 		cons.Logf("ERROR", "pow(\"a\") self-test failed; refusing to mine.")
 		return 1
 	}
@@ -209,10 +220,7 @@ func run() int {
 	}
 
 	if o.bench || o.sustained || o.statbench {
-		threads := o.threads
-		if threads <= 0 {
-			threads = runtime.NumCPU()
-		}
+		threads := normalizedThreadCount(o.threads)
 		if o.bench {
 			return runBench(threads, o.pin, o.backend(), o.pair)
 		}
@@ -260,9 +268,13 @@ func run() int {
 	var prevMB, prevBlocks, prevRej uint64
 	var counted bool
 	client := &getwork.Client{
-		Endpoint: o.daemon,
-		Wallet:   o.wallet,
-		Submits:  submits,
+		Endpoint:     o.daemon,
+		Wallet:       o.wallet,
+		Submits:      submits,
+		OnDisconnect: st.Invalidate,
+		SubmitValid: func(s getwork.Submit) bool {
+			return st.Active() && st.Epoch() == s.Epoch
+		},
 		Logf: func(format string, args ...interface{}) {
 			cons.Logf("INFO", format, args...)
 		},
@@ -275,17 +287,16 @@ func run() int {
 			cons.Logf("DEBUG", format, args...)
 		}
 	}
-	client.OnJob = func(j getwork.Job) {
+	client.OnJob = func(j getwork.Job) bool {
 		if o.debugFlag {
 			cons.Logf("DEBUG", "job %s height=%d diff=%d mb=%d blocks=%d rej=%d",
 				j.JobID, j.Height, j.Difficultyuint64, j.MiniBlocks, j.Blocks, j.Rejected)
 		}
 		_, err := st.SetJob(j)
 		if err != nil {
-			if o.debugFlag {
-				cons.Logf("DEBUG", "rejected job push: %v", err)
-			}
-			return
+			st.Invalidate()
+			cons.Logf("ERROR", "rejected job push: %v", err)
+			return false
 		}
 		// The family CLIs surface share accounting only through the status
 		// line counters; per-event lines are -debug chatter.
@@ -296,7 +307,7 @@ func run() int {
 			if !counted {
 				prevMB, prevBlocks, prevRej = j.MiniBlocks, j.Blocks, j.Rejected
 				counted = true
-				return
+				return true
 			}
 			if j.MiniBlocks > prevMB {
 				cons.Logf("DEBUG", "miniblock ACCEPTED (%d total)", j.MiniBlocks)
@@ -309,6 +320,7 @@ func run() int {
 			}
 			prevMB, prevBlocks, prevRej = j.MiniBlocks, j.Blocks, j.Rejected
 		}
+		return true
 	}
 
 	if !o.dryRun {
@@ -453,7 +465,7 @@ func statusLoop(ctx context.Context, cons *console.Console, st *miner.State, cli
 		// flowing because HiveOS h-run.sh consumes it (see Console.Status), and
 		// a run of 0.00 records during an outage is the correct report there
 		// while a gap is not.
-		if cons.VT() && !statusRowHasSomethingToSay(client.Connected.Load(), st.Epoch()) {
+		if cons.VT() && !statusRowHasSomethingToSay(client.Connected.Load() && st.Active(), st.Epoch()) {
 			continue
 		}
 
