@@ -302,6 +302,19 @@ bucket-cursor bookkeeping (~2-3%), so the realistic candidate expectation is
 least as much at 20T. Probes were working-tree-only and are fully reverted;
 this table is their record.
 
+### Emit slice-header hoist — measured, rejected
+
+The singleton append in `emitFullGroupRunGeneric` reloads the full three-word
+`v.runs` header from memory per record (`-gcflags=-S` shows the ptr/len/cap
+loads; the `appendOrderGroup` call in the other branch forces the round trip
+at the loop merge point). Hoisting local `runs`/`arena` slices through the
+column loop — threading them through `appendOrderGroup` and writing back on
+success only — measured **-0.38% [-0.98%, +0.23%]** over 20 pinned P-core
+couples. The reload is a same-address store-forwarded L1 hit costing ~1-2
+cycles, and carrying two extra live slice headers through the
+register-hungry induction re-sort costs at least as much back. The effect
+sits inside the ±0.3% layout floor: a null, not a win. Reverted.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
