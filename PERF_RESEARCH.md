@@ -279,6 +279,29 @@ screen. Retention rule for this campaign: point >= +2%
 at 20T sustained AND one-sided 95% lower bound > 0 there AND no demonstrated
 regression beyond -0.5% at the secondary target.
 
+### Ceiling probes (backlog 7 go/no-go) — GO
+
+Two deliberately-wrong builds bound what a scatter-style materializer can
+remove before any real implementation. Both were verified live by the
+positive control (`TestV114DifferentialVsSAIS` FAILS on both), built with
+`GOAMD64=v3` + `default.pgo`, and measured with 20 pinned P-core couples
+against the same base binary:
+
+| probe | removes | effect vs base |
+|---|---|---:|
+| B: flat-loop materializer, radix intact | group scan incl. all merges | **+12.61% [+12.05%, +13.17%]** |
+| A: flat loop AND no pass 3/swap | scan + pass-3 record scatter | **+17.15% [+16.71%, +17.59%]** |
+
+Attribution: scan side ~12.6%, pass-3 side ~4.5%, additive to within noise.
+Both tripwires cleared (below the +20% "measurement is wrong" bound — the
+theoretical ceiling was ~+19.6% — and far above the +1% "stage is
+memmove-bound" kill signal). A real fused-scatter must keep the equal-key
+merges (~8% of hash by the old profile's cumulative arithmetic) and pay
+bucket-cursor bookkeeping (~2-3%), so the realistic candidate expectation is
+**~+6-7% at 1T micro**, with the memory-traffic mechanism arguing for at
+least as much at 20T. Probes were working-tree-only and are fully reverted;
+this table is their record.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
