@@ -206,6 +206,79 @@ and B-C-C-B order at both targets. Paired deltas straddled zero (1T:
 -1.42%/+2.96%; 20T: -0.85%/+1.20%), which is exactly the noise pattern the
 predeclared median/target gate is intended to reject.
 
+## 2026-08-05 SA-stage campaign — calibration and premise checks
+
+Campaign plan: stats-first, then a structural rewrite of the stage-5
+materializer ("scatter positions, not records"). Before any implementation,
+three premise checks ran on the `perf/sa-campaign` branch.
+
+### Stage-bracket coverage verified (the 109 µs deficit is real)
+
+The 2026-08-03 stage table inferred Go's per-stage microseconds from RDTSC
+shares times a wall rate, which cannot reveal unbracketed time on its own. The
+check: divide summed bracketed cycles/hash by the same run's wall ns/hash and
+compare the implied TSC rate across two unrelated regimes.
+
+| leg | cyc/hash (sum) | wall ns/hash-thread | implied TSC |
+|---|---:|---:|---:|
+| 1T x2, 120 s | 1,290,276 | 560,067 | **2.304 GHz** |
+| 20T x1, 300 s | 2,476,408 | 1,075,269 | **2.303 GHz** |
+
+Agreement to 0.04% across regimes with different SHA shares and contention
+means the brackets cover essentially all wall time (any fixed unbracketed
+fraction would have to scale identically in both regimes to fake this). The
+descriptor-SA deficit premise stands. Stage shares this run: 20T x1 SA 77.6% /
+SHA 16.1% / wolf 6.1%; 1T x2 SA 75.1% / SHA 16.6% / wolf 8.1%.
+
+### v114 descriptor distributions under sustained load (backlog 1 done)
+
+20T x1, 300 s, 5,581,504 hashes (1T x2 leg agrees on every share to two
+decimals — positive control across different nonce streams):
+
+- Template runs: 61.8/hash. Group-size shares: 1 g 26.7%, 2 g 17.2%, 3 g 12.5%,
+  4 g 9.6%, 5-8 g 21.0%, 9-16 g 10.9%, **17-25 g 1.81%, 26+ g 0.29%**.
+- Equal-key merge groups per hash: literal 2-4: 197.4, literal 5-8: 20.4,
+  literal 9-16: 10.8, literal 17-32: 13.4, two-run: 79.4, large fallback: 9.6.
+  Total ~331 collision groups/hash involving ~1,300 records — small against
+  the ~45k records/hash estimate, so a fixup-style materializer pays its
+  collision cost rarely.
+- v114 fallback hashes: 0 in both legs.
+
+**Backlog 2 CLOSED (population too small):** all-literal groups above the <=32
+fast path are bounded above by large-fallback merges = 9.6/hash, below the
+pre-registered >=18/hash trigger. No threshold candidate.
+
+**Backlog 3 TRIGGERED:** runs of 17-25 groups are 1.81% of template runs,
+above the pre-registered 1% trigger (26+ adds 0.29%). A `stage4ShortRunMax`
+variant A/B (16/20/32/40) is owed; expectation stays modest — the column-255
+sort is a small fraction of a run's emit work.
+
+### Measurement instrument calibrated (A/A with a layout-null arm)
+
+Micro, 20 alternating (base, layout-null) couples, each invocation a
+pre-built test binary pinned by process affinity 0x1 at High priority:
+
+- Within-couple pairing collapses the old 8-10% CoV to a ~0.15% standard
+  error on the mean effect — the historical CoV was unpaired pooling plus
+  rebuild/migration noise, not hashing noise.
+- The semantically-null layout change measures **+0.28% [-0.03%, +0.58%]**:
+  the layout-noise floor on this box/toolchain. Micro effects below ~0.6%
+  cannot be attributed to code semantics; the +2% gate keeps 3-6x margin.
+
+Sustained A/A (8-leg Thue-Morse, 240 s legs, 20T, steady-state window):
+null effect **+0.275% ± 0.26 pp, 95% CI [-0.45%, +1.00%]**, one-sided lower
+bound -0.28% — the instrument resolves the +2% gate with wide margin and
+correctly rejects a null. The +0.275% point estimate reproduces the micro's
+layout floor on an independent instrument; linear thermal drift -0.37%/leg
+confirmed, quadratic negligible. Run: `bench-results/thue-morse/`
+20260805-161156-aa-20t. See `scripts/bench-thue-morse.ps1` +
+`scripts/analyze-thue-morse.py` for the design (quadratic-drift-balanced
+order, steady-state [120 s, leg-end] window, drift-adjusted fit with 4
+residual df) and `scripts/bench-micro-couples.ps1` for the paired micro
+screen. Retention rule for this campaign: point >= +2%
+at 20T sustained AND one-sided 95% lower bound > 0 there AND no demonstrated
+regression beyond -0.5% at the secondary target.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
