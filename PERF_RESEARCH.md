@@ -302,6 +302,47 @@ bucket-cursor bookkeeping (~2-3%), so the realistic candidate expectation is
 least as much at 20T. Probes were working-tree-only and are fully reverted;
 this table is their record.
 
+### Fused-scatter materializer ("scatter positions, not records") — measured, REJECTED, backlog 7 closed
+
+The full candidate was implemented (commit `1f64e23`, reverted in history —
+kept for a possible AMD revisit): byte0 histogram accumulates position counts,
+two radix passes instead of three, the third pass replaced by a materializing
+scatter through 256 per-bucket cursors, equal-key collisions chain-linked and
+repaired by a fixup pass reusing the existing merge helpers. Every correctness
+gate passed first try: full suite, tagged suite + a fixup-branch coverage
+test, `-race`, and the million-hash differential (0 mismatches, 0 fallbacks).
+
+Measured against its parent commit (`GOAMD64=v3`, `default.pgo`):
+
+| instrument | effect |
+|---|---:|
+| 1T micro, 20 couples, P-core | **-0.01% [-0.55%, +0.53%]** (null) |
+| 1T micro, 12 couples, E-core | +0.13% [-0.17%, +0.43%] (null) |
+| 1T micro, 12 couples, P-core, `-pgo=off` both arms | +0.37% [-0.50%, +1.25%] (null; stale-PGO bias ~0.4 pp, not load-bearing) |
+| **20T sustained, 8-leg Thue-Morse, steady-state** | **-1.17% [-1.94%, -0.39%] — significant regression** |
+
+**The attribution finding (why the +17% ceiling did not survive):** the
+ceiling probes deleted the equal-key merges along with the scan; the real
+candidate must keep them. The 1T null against probe B's +12.6% means the
+scan's apparent cost was almost entirely the ~331 merge groups/hash (suffix
+compares over wolf's highly repetitive output), not the bookkeeping around
+them — the branch ladder, key compares, and record re-read are nearly free
+next to them. And at 20T the scatter actively hurts: the old writer emits one
+strictly sequential, hardware-prefetched SA write stream, while the scatter
+turns that into 256-way scattered RFOs and the fixup adds copy-out traffic —
+exactly the axis L3 contention punishes.
+
+Consequences, all closed:
+- **Backlog 7 is CLOSED.** The removable-looking stage-5 surface is merge
+  work that correctness requires; bookkeeping restructures cannot pay.
+- **B2 (collision-flag precompute) and B3 (offset-array split) are dead** by
+  the same finding — both remove strictly less than the full scan removal
+  that already measured null at 1T, and keep the regressive scatter (B3) or
+  nothing (B2) at 20T.
+- The only surface left in stage 5 is the **merge comparator itself**
+  (~12% of hash across ~331 groups): any future candidate must cheapen
+  suffix comparison, not descriptor bookkeeping.
+
 ### Emit slice-header hoist — measured, rejected
 
 The singleton append in `emitFullGroupRunGeneric` reloads the full three-word
