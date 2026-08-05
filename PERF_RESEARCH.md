@@ -80,13 +80,20 @@ everywhere. The tag is kept so the kernel can be re-measured on AMD, where the
 
 ## Ranked Miner Backlog
 
-1. Use `-tags v114stats` to measure v114 group-count and equal-key merge
-   distributions under real sustained runs.
-2. If literal equal-key groups above the current `<=32` fast path are frequent,
-   benchmark threshold variants before changing production code.
-3. Revisit the stage-4 short-run cutoff near `stage4ShortRunMax = 25` only with
-   a median microbench improvement and sustained `20 --pin --high`
-   confirmation.
+1. ~~Use `-tags v114stats` to measure v114 group-count and equal-key merge
+   distributions under real sustained runs.~~ **DONE 2026-08-05** — see the
+   campaign section below for the distributions.
+2. ~~If literal equal-key groups above the current `<=32` fast path are
+   frequent, benchmark threshold variants before changing production code.~~
+   **CLOSED 2026-08-05: population too small** (all-literal >32 groups are
+   bounded above by 9.6 large-fallback merges/hash, below the pre-registered
+   18/hash trigger).
+3. ~~Revisit the stage-4 short-run cutoff near `stage4ShortRunMax = 25`.~~
+   **CLOSED 2026-08-05: all four pre-registered variants (16/20/32/40) are
+   micro nulls** — best +0.13% [-0.53%, +0.80%], every CI excludes the +2%
+   gate; the trigger fired (17-25-group runs are 1.81% of template runs) but
+   the population's work share is too small to matter. Binary-distinctness
+   positive control passed (all five arms hash differently). Keep 25.
 4. Add an optional `racedetector` smoke note only as a safety workflow; do not
    put it in `go.mod`.
 5. Consider assembly only after a profile shows a byte-search or bulk-copy loop
@@ -101,11 +108,14 @@ everywhere. The tag is kept so the kernel can be re-measured on AMD, where the
    MSB rank marking is untried, and v114 has no rank array. Do **not** swap the SA
    algorithm either: tnn-miner vendors libdivsufsort, the same family as v114, and
    SA-IS/GSACA/CaPS-SA wins are all large-input or multi-threaded regimes.
-7. The honest remaining SA target is `writeFusedRunsToSA` (48.4% cum). Its three costs are
-   the radix sort (restructure already dead, ledger rows 13-14), the arena `memmove`
-   (specialization dead twice, above), and the group scan. A win here needs to *remove*
-   work — e.g. emit records already in SA order so the final copy disappears — not to
-   micro-tune the copy.
+7. ~~The honest remaining SA target is `writeFusedRunsToSA` (48.4% cum)...~~
+   **CLOSED 2026-08-05.** The "emit in SA order" idea was implemented as a
+   fused byte0-scatter materializer, passed every correctness gate, and was
+   REJECTED: 1T null, 20T sustained -1.17% [-1.94%, -0.39%]. See the campaign
+   section — the scan's apparent cost is the equal-key merges, which
+   correctness requires, and the scatter loses the sequential SA write
+   stream. The only remaining stage-5 surface is the merge comparator
+   itself; nothing bookkeeping-shaped is left here.
 
 ### Where the time actually goes (1T CPU profile, `BenchmarkHashV114`, 3000x)
 
@@ -342,6 +352,27 @@ Consequences, all closed:
 - The only surface left in stage 5 is the **merge comparator itself**
   (~12% of hash across ~331 groups): any future candidate must cheapen
   suffix comparison, not descriptor bookkeeping.
+
+### Campaign close-out notes
+
+- **Underpowered-gate hypothesis for older ledger rows:** every pre-2026-08-05
+  sustained verdict was produced by a 4-leg ABBA design whose null
+  distribution (measured by this campaign's A/A) spans roughly ±1 pp and
+  whose CI on the repo's one KEPT candidate spanned zero. Some past
+  "confident" dead ends may have been real sub-2% effects in either
+  direction. Under the standing strict +2% gate this changes no decision,
+  but do not cite old point estimates as precise magnitudes.
+- **The "+1.47% unconditional eight-word arena copy" row** records no
+  protocol and no site; the checkptr mention suggests the stage-5 sa copy
+  (the unsafe alias side) rather than the emit-side arena append, but this
+  could not be pinned down from the repo. It remains shelved under the
+  user's strict-gate policy either way.
+- **Campaign net result:** no perf candidate retained. The durable
+  deliverables are the corrected comparator-aligned harness, the calibrated
+  paired instruments (couple-based micro, Thue-Morse sustained, A/A
+  layout-null floor ~0.3%), five backlog items closed with data, and the
+  attribution finding that stage-5's remaining cost is merge-comparator
+  work, not bookkeeping.
 
 ### Emit slice-header hoist — measured, rejected
 
