@@ -1,16 +1,28 @@
 package astrobwt
 
-// Stage-5 merge: radix-sort the emitted records by 3-byte key, then write
-// positions per equal-key group — singleton runs copy straight out,
-// all-literal groups (<=32) insertion-sort on the stack, 2-run groups do a
-// linear merge, and rare larger groups fall back to a bottom-up k-way merge.
-// Port of write_fused_runs_to_sa and callees (v114_stubs.cpp).
+// Stage-5 merge: two stable radix passes order the records by the low two
+// lexical key bytes, then the byte0 pass is fused with materialization — each
+// record's positions are written directly at their final SA offset through 256
+// per-bucket cursors, so the third record scatter and the sequential group
+// scan disappear. Equal-key collisions get contiguous provisional writes plus
+// a chained fixup entry; a post-pass re-sorts or merges exactly those ranges
+// (in-place insertion sort for all-singleton groups <=32, linear merge for two
+// sub-runs, bottom-up k-way merge otherwise). Port of write_fused_runs_to_sa
+// (v114_stubs.cpp) restructured around the scatter; merge semantics unchanged.
 
 import (
 	"bytes"
 	"encoding/binary"
 	"unsafe"
 )
+
+// keySentinel initializes the per-bucket previous-key slots. Keys are 24-bit,
+// so no record can ever equal it; without a sentinel, a bucket whose first
+// arrival had key 0 (or a stale value from a previous hash) would open a
+// phantom collision group and the fixup would re-sort a range spanning
+// unequal keys — silently wrong, since the after-key compare skips the first
+// three bytes.
+const keySentinel = 0xffffffff
 
 // compareSuffixesAfterKey compares two suffixes whose first 3 bytes (the
 // record key) are already known equal.
@@ -69,22 +81,22 @@ func suffixLessAfterKey(v *stage4View, a, b uint32) bool {
 	return a < b
 }
 
-// radixSortRunsByStoredKey sorts native little-endian 24-bit keys by running
-// stable passes from the lexical last byte to the first. Ping-pongs
-// runs<->tmp; the result lands in runs.
-func radixSortRunsByStoredKey(v *v114Scratch) {
+// radixSortRunsByLowKeyBytes stably sorts the records by (byte1, byte2) of
+// the native little-endian key — byte2 pass then byte1 pass, ping-ponging
+// runs->tmp->runs. Byte0, the lexically most significant byte, is handled by
+// the materializing scatter, whose per-bucket cursor table is sized from
+// posCounts0 (positions, not records, per byte0 bucket) accumulated here.
+func radixSortRunsByLowKeyBytes(v *v114Scratch, posCounts0 *[256]uint32) {
 	runs := v.runs
 	n := len(runs)
-	if n <= 1 {
-		return
-	}
 	tmp := v.radixTmp[:n]
 
-	var counts0, counts1, counts2 [256]uint32
+	var counts1, counts2 [256]uint32
 	for i := range runs {
-		counts0[runs[i].key&0xff]++
-		counts1[(runs[i].key>>8)&0xff]++
-		counts2[(runs[i].key>>16)&0xff]++
+		r := runs[i]
+		posCounts0[r.key&0xff] += r.count()
+		counts1[(r.key>>8)&0xff]++
+		counts2[(r.key>>16)&0xff]++
 	}
 
 	var sum uint32
@@ -110,94 +122,38 @@ func radixSortRunsByStoredKey(v *v114Scratch) {
 		runs[counts1[(r.key>>8)&0xff]] = r
 		counts1[(r.key>>8)&0xff]++
 	}
-
-	sum = 0
-	for i := 0; i < 256; i++ {
-		c := counts0[i]
-		counts0[i] = sum
-		sum += c
-	}
-	for i := range runs {
-		r := runs[i]
-		tmp[counts0[r.key&0xff]] = r
-		counts0[r.key&0xff]++
-	}
-	// result is in tmp: swap the buffers (runs keeps len n, radixTmp cap)
-	v.runs = tmp
-	v.radixTmp = runs[:cap(runs)]
 }
 
-func fusedRunPos(arena []uint32, r stage5Run, rel uint32) uint32 {
-	begin := r.begin()
-	if r.isLiteral() {
-		return begin
-	}
-	return arena[begin+rel]
+// fixGroup describes one equal-key collision group: a contiguous SA range
+// [saStart, saEnd) holding k provisionally-ordered sub-runs, whose start
+// offsets live in the fixSlots chain from firstSlot.
+type fixGroup struct {
+	saStart, saEnd      uint32
+	firstSlot, lastSlot int32
 }
 
-// tryWriteLiteralGroup handles equal-key groups of <=32 all-literal runs with
-// a stack insertion sort.
-func tryWriteLiteralGroup(view *stage4View, runs []stage5Run, sa []int32, outPos int) (int, bool) {
-	count := len(runs)
-	if count == 0 || count > 32 {
-		return outPos, false
+// noteCollision opens or extends the collision group for bucket b. Kept out
+// of line so the scatter's hot loop does not spill registers for a branch
+// taken a few hundred times per hash. prevStart is where the group's previous
+// record wrote; curStart is where the current record is about to write.
+//
+//go:noinline
+func noteCollision(v *v114Scratch, open *[256]int32, b uint32, prevStart, curStart uint32) {
+	g := open[b]
+	if g < 0 {
+		v.fixSlots = append(v.fixSlots, prevStart)
+		v.fixNext = append(v.fixNext, -1)
+		first := int32(len(v.fixSlots) - 1)
+		v.fixGroups = append(v.fixGroups, fixGroup{saStart: prevStart, firstSlot: first, lastSlot: first})
+		g = int32(len(v.fixGroups) - 1)
+		open[b] = g
 	}
-	var positions [32]uint32
-	for i := 0; i < count; i++ {
-		if !runs[i].isLiteral() {
-			return outPos, false
-		}
-		positions[i] = runs[i].begin()
-	}
-	v114StatsRecordLiteralGroup(count)
-	for i := 1; i < count; i++ {
-		pos := positions[i]
-		j := i
-		for j > 0 && suffixLessAfterKey(view, pos, positions[j-1]) {
-			positions[j] = positions[j-1]
-			j--
-		}
-		positions[j] = pos
-	}
-	for i := 0; i < count; i++ {
-		sa[outPos] = int32(positions[i])
-		outPos++
-	}
-	return outPos, true
-}
-
-// tryWriteTwoRuns merges exactly two runs linearly.
-func tryWriteTwoRuns(view *stage4View, arena []uint32, runs []stage5Run, sa []int32, outPos int) (int, bool) {
-	if len(runs) != 2 {
-		return outPos, false
-	}
-	v114StatsRecordTwoRunMerge()
-	left, right := runs[0], runs[1]
-	leftCount, rightCount := left.count(), right.count()
-	var leftRel, rightRel uint32
-	for leftRel < leftCount && rightRel < rightCount {
-		lpos := fusedRunPos(arena, left, leftRel)
-		rpos := fusedRunPos(arena, right, rightRel)
-		if suffixLessAfterKey(view, lpos, rpos) {
-			sa[outPos] = int32(lpos)
-			leftRel++
-		} else {
-			sa[outPos] = int32(rpos)
-			rightRel++
-		}
-		outPos++
-	}
-	for leftRel < leftCount {
-		sa[outPos] = int32(fusedRunPos(arena, left, leftRel))
-		leftRel++
-		outPos++
-	}
-	for rightRel < rightCount {
-		sa[outPos] = int32(fusedRunPos(arena, right, rightRel))
-		rightRel++
-		outPos++
-	}
-	return outPos, true
+	v.fixSlots = append(v.fixSlots, curStart)
+	v.fixNext = append(v.fixNext, -1)
+	idx := int32(len(v.fixSlots) - 1)
+	fg := &v.fixGroups[g]
+	v.fixNext[fg.lastSlot] = idx
+	fg.lastSlot = idx
 }
 
 func mergeSortedPositionsAfterKey(view *stage4View, src []uint32, leftBegin, leftEnd, rightEnd int, dst []uint32, dstBegin int) {
@@ -263,69 +219,143 @@ func mergeEqualKeyRuns(view *stage4View, v *v114Scratch) {
 	}
 }
 
-// writeFusedRunsToSA sorts the records and writes the final SA positions.
+// fixupCollisionGroups restores correct order inside every collision group's
+// SA range. Sub-run boundaries come from the group's slot chain; the merge
+// helpers and comparator are the same ones the scan-based writer used, so the
+// output multiset and order are identical.
+func fixupCollisionGroups(view *stage4View, v *v114Scratch, saU32 []uint32) {
+	for gi := range v.fixGroups {
+		g := &v.fixGroups[gi]
+		v.runLens = v.runLens[:0]
+		prev := v.fixSlots[g.firstSlot]
+		for idx := v.fixNext[g.firstSlot]; idx >= 0; idx = v.fixNext[idx] {
+			s := v.fixSlots[idx]
+			v.runLens = append(v.runLens, s-prev)
+			prev = s
+		}
+		v.runLens = append(v.runLens, g.saEnd-prev)
+		k := len(v.runLens)
+		size := int(g.saEnd - g.saStart)
+		seg := saU32[g.saStart:g.saEnd:g.saEnd]
+
+		if size == k && k <= 32 {
+			// every sub-run is a single position: the population the old
+			// stack-array literal path handled, now sorted in place
+			v114StatsRecordLiteralGroup(k)
+			for i := 1; i < size; i++ {
+				pos := seg[i]
+				j := i
+				for j > 0 && suffixLessAfterKey(view, pos, seg[j-1]) {
+					seg[j] = seg[j-1]
+					j--
+				}
+				seg[j] = pos
+			}
+		} else if k == 2 {
+			// linear merge of two sorted sub-runs; the source must be copied
+			// out first — merging back into the same range would overwrite
+			// unread left-run positions
+			v114StatsRecordTwoRunMerge()
+			v.groupPos = v.groupPos[:size]
+			copy(v.groupPos, seg)
+			mergeSortedPositionsAfterKey(view, v.groupPos, 0, int(v.runLens[0]), size, seg, 0)
+		} else {
+			v114StatsRecordLargeFallbackMerge()
+			v.groupPos = v.groupPos[:size]
+			copy(v.groupPos, seg)
+			mergeEqualKeyRuns(view, v)
+			copy(seg, v.groupPos[:size])
+		}
+	}
+}
+
+// writeFusedRunsToSA sorts the records by key and writes the final SA
+// positions, materializing during the byte0 scatter.
 func writeFusedRunsToSA(view *stage4View, v *v114Scratch, sa []int32) bool {
-	radixSortRunsByStoredKey(v)
+	var posCounts0 [256]uint32
+	radixSortRunsByLowKeyBytes(v, &posCounts0)
+
+	// prefix-sum the position counts into per-bucket [cur, bucketEnd) ranges.
+	// The total check is the old terminal outPos == len(sa) hoisted up front:
+	// same decline set, and it is what keeps every later write in bounds.
+	type hotState struct{ cur, prevKey uint32 }
+	var st [256]hotState
+	var bucketEnd [256]uint32
+	var sum uint32
+	for b := 0; b < 256; b++ {
+		st[b].cur = sum
+		st[b].prevKey = keySentinel
+		sum += posCounts0[b]
+		bucketEnd[b] = sum
+	}
+	if int(sum) != len(sa) {
+		return false
+	}
 
 	// uint32 view of sa: positions < 2^31, so int32/uint32 bits are identical
 	// and arena runs can be bulk-copied (the C++ memcpys here). buildSAv114
 	// guarantees len(sa) >= 1.
 	saU32 := unsafe.Slice((*uint32)(unsafe.Pointer(&sa[0])), len(sa))
 
-	runs := v.runs
-	arena := v.arena
-	n := len(runs)
-	groupStart := 0
-	outPos := 0
-	for groupStart < n {
-		r0 := runs[groupStart]
-		groupEnd := groupStart + 1
-		for groupEnd < n && runs[groupEnd].key == r0.key {
-			groupEnd++
-		}
-
-		if groupEnd == groupStart+1 {
-			if r0.packed>>17 == 0 {
-				// literal singleton (packed IS the position) — hottest case
-				if outPos >= len(saU32) {
-					return false
-				}
-				saU32[outPos] = r0.packed
-				outPos++
-			} else {
-				begin := r0.begin()
-				count := r0.count()
-				if outPos+int(count) > len(saU32) {
-					return false
-				}
-				outPos += copy(saU32[outPos:], arena[begin:begin+count])
-			}
-		} else {
-			group := runs[groupStart:groupEnd]
-			var handled bool
-			if outPos, handled = tryWriteLiteralGroup(view, group, sa, outPos); !handled {
-				if outPos, handled = tryWriteTwoRuns(view, arena, group, sa, outPos); !handled {
-					// rare fallback: expand all positions and k-way merge
-					v114StatsRecordLargeFallbackMerge()
-					v.groupPos = v.groupPos[:0]
-					v.runLens = v.runLens[:0]
-					for i := range group {
-						count := group[i].count()
-						v.runLens = append(v.runLens, count)
-						for rel := uint32(0); rel < count; rel++ {
-							v.groupPos = append(v.groupPos, fusedRunPos(arena, group[i], rel))
-						}
-					}
-					mergeEqualKeyRuns(view, v)
-					if outPos+len(v.groupPos) > len(saU32) {
-						return false
-					}
-					outPos += copy(saU32[outPos:], v.groupPos)
-				}
-			}
-		}
-		groupStart = groupEnd
+	v.fixSlots = v.fixSlots[:0]
+	v.fixNext = v.fixNext[:0]
+	v.fixGroups = v.fixGroups[:0]
+	var open [256]int32
+	var prevStart [256]uint32
+	for b := range open {
+		open[b] = -1
 	}
 
-	return outPos == len(sa)
+	// Equal keys arrive consecutively within a byte0 bucket: the two passes
+	// left the records stably sorted by (byte1, byte2), and equal full keys
+	// share byte0, so within one bucket's arrival subsequence they are
+	// adjacent. That is what lets a single prevKey slot per bucket detect
+	// every collision and close each group exactly once.
+	runs := v.runs
+	arena := v.arena
+	for i := range runs {
+		r := runs[i]
+		b := r.key & 0xff
+		hs := &st[b]
+		start := hs.cur
+		if r.key == hs.prevKey {
+			noteCollision(v, &open, b, prevStart[b], start)
+		} else if open[b] >= 0 {
+			v.fixGroups[open[b]].saEnd = start
+			open[b] = -1
+		}
+		if r.packed>>17 == 0 {
+			// literal singleton (packed IS the position) — hottest case
+			if start >= bucketEnd[b] {
+				return false
+			}
+			saU32[start] = r.packed
+			hs.cur = start + 1
+		} else {
+			cnt := r.packed >> 17
+			begin := r.packed & 0x1ffff
+			if start+cnt > bucketEnd[b] {
+				return false
+			}
+			copy(saU32[start:bucketEnd[b]], arena[begin:begin+cnt])
+			hs.cur = start + cnt
+		}
+		hs.prevKey = r.key
+		prevStart[b] = start
+	}
+
+	// close still-open groups, then verify every bucket landed exactly on its
+	// boundary — the analogue of the old terminal check, converting any
+	// cursor-accounting bug into a decline instead of a silently wrong SA
+	for b := 0; b < 256; b++ {
+		if open[b] >= 0 {
+			v.fixGroups[open[b]].saEnd = st[b].cur
+		}
+		if st[b].cur != bucketEnd[b] {
+			return false
+		}
+	}
+
+	fixupCollisionGroups(view, v, saU32)
+	return true
 }

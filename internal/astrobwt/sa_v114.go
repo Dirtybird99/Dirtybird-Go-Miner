@@ -59,18 +59,30 @@ type v114Scratch struct {
 	mergePos []uint32
 	runLens  []uint32
 	nextLens []uint32
+	// collision-fixup bookkeeping for the materializing scatter. Sized at the
+	// provable worst case — slots <= records <= MAX_LENGTH (every record
+	// covers at least one position), groups <= records/2 — so the appends can
+	// never grow and zero-alloc holds by construction, not by sampling.
+	// Collision-free pages are never touched, so the virtual size is not a
+	// cache cost.
+	fixSlots  []uint32
+	fixNext   []int32
+	fixGroups []fixGroup
 }
 
 func newV114Scratch() *v114Scratch {
 	return &v114Scratch{
-		order:    make([]uint32, 0, stage4MaxGroupRun),
-		arena:    make([]uint32, 0, arenaIndexCount),
-		runs:     make([]stage5Run, 0, MAX_LENGTH),
-		radixTmp: make([]stage5Run, MAX_LENGTH),
-		groupPos: make([]uint32, 0, MAX_LENGTH),
-		mergePos: make([]uint32, MAX_LENGTH),
-		runLens:  make([]uint32, 0, MAX_LENGTH),
-		nextLens: make([]uint32, 0, MAX_LENGTH),
+		order:     make([]uint32, 0, stage4MaxGroupRun),
+		arena:     make([]uint32, 0, arenaIndexCount),
+		runs:      make([]stage5Run, 0, MAX_LENGTH),
+		radixTmp:  make([]stage5Run, MAX_LENGTH),
+		groupPos:  make([]uint32, 0, MAX_LENGTH),
+		mergePos:  make([]uint32, MAX_LENGTH),
+		runLens:   make([]uint32, 0, MAX_LENGTH),
+		nextLens:  make([]uint32, 0, MAX_LENGTH),
+		fixSlots:  make([]uint32, 0, MAX_LENGTH),
+		fixNext:   make([]int32, 0, MAX_LENGTH),
+		fixGroups: make([]fixGroup, 0, MAX_LENGTH/2),
 	}
 }
 
