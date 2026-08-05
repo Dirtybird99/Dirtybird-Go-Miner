@@ -3,6 +3,8 @@
 
 package refpow
 
+import "unsafe"
+
 const LittleEndian = false
 const BigEndian = true
 

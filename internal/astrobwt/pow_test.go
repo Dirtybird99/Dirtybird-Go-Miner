@@ -38,6 +38,14 @@ func TestKAT(t *testing.T) {
 	}
 }
 
+func TestWriteLittleEndianSA(t *testing.T) {
+	dst := make([]byte, 12)
+	writeLittleEndianSA(dst, []int32{0x01020304, -1, 0x11223344})
+	if got, want := hex.EncodeToString(dst), "04030201ffffffff44332211"; got != want {
+		t.Fatalf("serialized SA = %s, want %s", got, want)
+	}
+}
+
 // 48-byte miniblock vector, interleaved with random inputs to catch stale
 // scratch state leaking between hashes (from derohe pow_test.go).
 func TestRepeat(t *testing.T) {
