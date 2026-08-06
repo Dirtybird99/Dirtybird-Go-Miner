@@ -150,14 +150,27 @@ func tryWriteLiteralGroup(view *stage4View, runs []stage5Run, sa []int32, outPos
 		positions[i] = runs[i].begin()
 	}
 	v114StatsRecordLiteralGroup(count)
+	if V114StatsEnabled && count >= 17 {
+		v114StatsAnalyzeBigGroup(view, positions[:count], 0)
+	}
+	cmps := 0
 	for i := 1; i < count; i++ {
 		pos := positions[i]
 		j := i
-		for j > 0 && suffixLessAfterKey(view, pos, positions[j-1]) {
+		for j > 0 {
+			if V114StatsEnabled {
+				cmps++
+			}
+			if !suffixLessAfterKey(view, pos, positions[j-1]) {
+				break
+			}
 			positions[j] = positions[j-1]
 			j--
 		}
 		positions[j] = pos
+	}
+	if V114StatsEnabled {
+		v114StatsRecordLiteralCompares(count, cmps)
 	}
 	for i := 0; i < count; i++ {
 		sa[outPos] = int32(positions[i])
@@ -175,7 +188,11 @@ func tryWriteTwoRuns(view *stage4View, arena []uint32, runs []stage5Run, sa []in
 	left, right := runs[0], runs[1]
 	leftCount, rightCount := left.count(), right.count()
 	var leftRel, rightRel uint32
+	cmps := 0
 	for leftRel < leftCount && rightRel < rightCount {
+		if V114StatsEnabled {
+			cmps++
+		}
 		lpos := fusedRunPos(arena, left, leftRel)
 		rpos := fusedRunPos(arena, right, rightRel)
 		if suffixLessAfterKey(view, lpos, rpos) {
@@ -200,9 +217,12 @@ func tryWriteTwoRuns(view *stage4View, arena []uint32, runs []stage5Run, sa []in
 	return outPos, true
 }
 
-func mergeSortedPositionsAfterKey(view *stage4View, src []uint32, leftBegin, leftEnd, rightEnd int, dst []uint32, dstBegin int) {
+func mergeSortedPositionsAfterKey(view *stage4View, src []uint32, leftBegin, leftEnd, rightEnd int, dst []uint32, dstBegin int, cmps *int) {
 	left, right, out := leftBegin, leftEnd, dstBegin
 	for left < leftEnd && right < rightEnd {
+		if V114StatsEnabled {
+			*cmps++
+		}
 		lpos, rpos := src[left], src[right]
 		if suffixLessAfterKey(view, lpos, rpos) {
 			dst[out] = lpos
@@ -231,6 +251,7 @@ func mergeEqualKeyRuns(view *stage4View, v *v114Scratch) {
 	if len(v.runLens) <= 1 {
 		return
 	}
+	cmps := 0
 	n := len(v.groupPos)
 	v.mergePos = v.mergePos[:cap(v.mergePos)]
 	src := v.groupPos
@@ -249,7 +270,7 @@ func mergeEqualKeyRuns(view *stage4View, v *v114Scratch) {
 				continue
 			}
 			rightLen := int(v.runLens[i+1])
-			mergeSortedPositionsAfterKey(view, src, inBase, inBase+leftLen, inBase+leftLen+rightLen, dst, outBase)
+			mergeSortedPositionsAfterKey(view, src, inBase, inBase+leftLen, inBase+leftLen+rightLen, dst, outBase, &cmps)
 			v.nextLens = append(v.nextLens, uint32(leftLen+rightLen))
 			inBase += leftLen + rightLen
 			outBase += leftLen + rightLen
@@ -260,6 +281,9 @@ func mergeEqualKeyRuns(view *stage4View, v *v114Scratch) {
 	}
 	if !fromGroupPos { // final result sits in mergePos; move it back
 		copy(v.groupPos[:n], src[:n])
+	}
+	if V114StatsEnabled {
+		v114StatsRecordKWayCompares(cmps)
 	}
 }
 
@@ -301,6 +325,10 @@ func writeFusedRunsToSA(view *stage4View, v *v114Scratch, sa []int32) bool {
 				outPos += copy(saU32[outPos:], arena[begin:begin+count])
 			}
 		} else {
+			var t0 uint64
+			if V114StatsEnabled {
+				t0 = v114Cycles()
+			}
 			group := runs[groupStart:groupEnd]
 			var handled bool
 			if outPos, handled = tryWriteLiteralGroup(view, group, sa, outPos); !handled {
@@ -316,12 +344,18 @@ func writeFusedRunsToSA(view *stage4View, v *v114Scratch, sa []int32) bool {
 							v.groupPos = append(v.groupPos, fusedRunPos(arena, group[i], rel))
 						}
 					}
+					if V114StatsEnabled && len(v.runLens) >= 2 {
+						v114StatsAnalyzeBigGroup(view, v.groupPos, 1)
+					}
 					mergeEqualKeyRuns(view, v)
 					if outPos+len(v.groupPos) > len(saU32) {
 						return false
 					}
 					outPos += copy(saU32[outPos:], v.groupPos)
 				}
+			}
+			if V114StatsEnabled {
+				v114StatsRecordMergeBracket(v114Cycles() - t0)
 			}
 		}
 		groupStart = groupEnd
