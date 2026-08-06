@@ -421,6 +421,92 @@ cycles, and carrying two extra live slice headers through the
 register-hungry induction re-sort costs at least as much back. The effect
 sits inside the ±0.3% layout floor: a null, not a win. Reverted.
 
+## 2026-08-06 merge-comparator campaign — no candidate retained, surface closed
+
+The follow-on to the SA-stage campaign, against the one surface it left open:
+the equal-key merge comparator. Structure: measure -> bound -> build, with
+pre-registered kill rules at every step. All three candidates died by their
+own rules; the campaign's product is the measured map of the surface.
+
+### Step 1 — direct measurement (v114stats extension, zero untagged cost)
+
+New tagged-only counters (compares per merge path and per literal bucket, an
+overhead-calibrated RDTSC bracket over the multi-record merge arm, and a
+low-entropy discriminator for large groups). A/A of the instrumented source
+built UNTAGGED vs base: +0.01% [-0.73%, +0.76%] — the V114StatsEnabled
+guards const-fold away. Sustained legs (20T x1 300 s; 1T x2 120 s):
+
+- **Merge-branch share S = 12.6% of hash at 20T, 9.7% at 1T** (bracket
+  cycles / anchored 2.304 GHz TSC). KILL X (S < 4%) passed with 3x margin —
+  and the campaign-1 confound worry dissolves: the 11.2% subtraction was
+  about right, and the share GROWS at 20T.
+- Compares/hash: literal 3,383 + k-way 2,864 + two-run ~320 ≈ 6,600 — 1.5x
+  the estimate, with the k-way path 3x larger than modeled (~298
+  compares/group). (A first-run counter bug — the two-run flush was missing
+  — was found by its own zero and fixed.)
+- The 17-32 literal bucket runs 173 compares/group ≈ n²/4: inputs NOT
+  near-sorted, so binary insertion was not auto-killed by sortedness.
+- **Low-entropy hypothesis CONFIRMED overwhelmingly**: 99.98% of large
+  literal groups have repeated-byte (vvv) keys, 96.6% are delta-1 position
+  chains (q = 0.97), extreme-member LCP < 8 in 99.997% — the constant-run
+  signature, with members clustered at run tails. K-way groups show the
+  same shape (79% vvv, 67% contiguous).
+
+### Step 2 — ceiling probes (wrong-by-design, positive controls failed as required)
+
+| probe | replaces | effect (20 couples, P-core) |
+|---|---|---:|
+| C1: no memcmp fallthrough | the walk after an 8-byte tie | **+1.25% [+0.86%, +1.65%]** |
+| C2: comparator -> `a < b` | everything | **+5.39% [+4.67%, +6.13%]** |
+
+Comparator-only share C = 5.39/105.39 = **5.1% of hash**; the walks are
+cheap and the **call/load overhead is +4.1 pp** of the +5.4 — per-call cost
+dominates, as the structural analysis predicted. Kill-rule outcomes:
+- KILL Y1 (C2 < +3%): passed.
+- **Candidate #1 (inline-friendly comparator header): KILLED** — needs
+  C >= 5.5%, measured 5.1%; the C2-C1 recompute puts its optimistic EV at
+  the gate, not above it.
+- **Candidate #3 (binary insertion >= 17): KILLED** — needs C >= 9%.
+- **Candidate #2 (constant-run closed form): proceeded** — needs
+  C >= 4.5/q = 4.66%, and q = 0.97 fired.
+
+### Step 3 — constant-run closed form: correct, real, and TOO SMALL
+
+Implemented (commit `5bddae4`, reverted in history): groups of 17-32 whose
+shared key is one repeated byte partition into delta-1 chains; within a
+maximal run of c ending at e, the first difference between two members
+always pits c against data[e+1], so one byte test orders the whole chain
+ascending (t > c) or descending (t < c, or run reaching logicalLen);
+chains merge with real compares. Proof on the function; edge cases
+unit-tested; 2,000-case fuzz against the production comparator; full
+suite, tagged suite, -race, million-hash differential all green (0
+mismatches, 0 fallbacks).
+
+Measured, micro screen vs its parent commit:
+- First run CONTAMINATED by my own protocol violation (launched seconds
+  after the million-hash gate's 5.5-minute all-core burn, no cooldown):
+  +0.98% [-0.40%, +2.37%] with the first three couples wildly out of
+  family. Recorded, discarded, and the lesson appended below.
+- Clean re-run after 3-minute cooldown (pre-declared as binding):
+  **+1.29% [+0.67%, +1.92%], one-sided lower bound +0.78%** — a real
+  effect, above the attribution floor, and BELOW the pre-registered
+  promotion rule (point >= +1.5%). **KILLED.** Comparator work is
+  compute-bound; campaign 1 established such wins do not grow at 20T, so
+  a +1.3% 1T effect cannot plausibly clear the +2% sustained gate.
+
+### Campaign verdict
+
+The comparator surface is now CLOSED for this host/toolchain: total
+elimination of the comparator is worth +5.4% at 1T, no implementable
+candidate captures more than ~+1.3%, and the strict gate needs +2%. What
+would reopen it: a materially different CPU (the AMD caveat from the LUT
+kernel applies here too), a relaxed gate, or an emit-side change that
+removes merge WORK rather than compare cost — the last of which is the
+restructure class campaign 1 closed. Protocol lesson appended to the
+methodology: **never start a measured leg immediately after a correctness
+burn — cooldown first, always** (the contaminated screen above is the
+in-repo example).
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest

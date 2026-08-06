@@ -12,5 +12,12 @@ func v114StatsRecordLiteralGroup(int)    {}
 func v114StatsRecordTwoRunMerge()        {}
 func v114StatsRecordLargeFallbackMerge() {}
 
+func v114Cycles() uint64                                  { return 0 }
+func v114StatsRecordMergeBracket(uint64)                  {}
+func v114StatsRecordLiteralCompares(int, int)             {}
+func v114StatsRecordTwoRunCompares(int)                   {}
+func v114StatsRecordKWayCompares(int)                     {}
+func v114StatsAnalyzeBigGroup(*stage4View, []uint32, int) {}
+
 // PrintV114Stats is a no-op unless built with -tags v114stats.
 func PrintV114Stats(io.Writer) {}
