@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 
 	"go-miner/internal/astrobwt"
 	"go-miner/internal/config"
+	"go-miner/internal/getwork"
+	"go-miner/internal/miner"
 )
 
 func TestValidSAName(t *testing.T) {
@@ -44,10 +47,100 @@ func TestKATCoversMiningBackends(t *testing.T) {
 	}
 }
 
-func TestDefaultPinModeMatchesPlatform(t *testing.T) {
-	want := runtime.GOOS == "windows" && runtime.GOARCH == "amd64" && runtime.NumCPU() <= 64
-	if got := defaultPinMode(); got != want {
+// Pinned decision cases, not a restatement of the implementation: the >64
+// boundary is the load-bearing choice (Windows processor groups make a
+// partial pin worse than none) and must fail if it drifts.
+func TestDefaultPinModeFor(t *testing.T) {
+	for _, tc := range []struct {
+		goos, goarch string
+		ncpu         int
+		want         bool
+	}{
+		{"windows", "amd64", 64, true},
+		{"windows", "amd64", 65, false},
+		{"windows", "amd64", 20, true},
+		{"windows", "arm64", 8, false},
+		{"linux", "amd64", 20, false},
+		{"darwin", "arm64", 10, false},
+	} {
+		if got := defaultPinModeFor(tc.goos, tc.goarch, tc.ncpu); got != tc.want {
+			t.Errorf("defaultPinModeFor(%s/%s, %d) = %v, want %v",
+				tc.goos, tc.goarch, tc.ncpu, got, tc.want)
+		}
+	}
+	if got, want := defaultPinMode(), defaultPinModeFor(runtime.GOOS, runtime.GOARCH, runtime.NumCPU()); got != want {
 		t.Fatalf("defaultPinMode() = %v, want %v", got, want)
+	}
+}
+
+// A version-nibble failure means the chain moved on: stop mining, say so
+// loudly. Everything else is keepalive-shaped (any JSON object decodes into
+// a Job with zeroed fields) and must NOT stop the miner — that was a live
+// defect: a pool keepalive took the miner to 0 H/s until the next push.
+func TestHandleRejectedPushClassifiesErrors(t *testing.T) {
+	newActiveState := func() *miner.State {
+		st := &miner.State{}
+		blob := make([]byte, miner.MiniblockSize)
+		blob[0] = 0x01
+		if _, err := st.SetJob(getwork.Job{
+			JobID:             "j",
+			Blockhashing_blob: hex.EncodeToString(blob),
+			Difficultyuint64:  1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	var level, msg string
+	logf := func(l, format string, args ...interface{}) {
+		level, msg = l, fmt.Sprintf(format, args...)
+	}
+
+	st := newActiveState()
+	handleRejectedPush(st, miner.ErrBadVersion, logf)
+	if st.Active() {
+		t.Fatal("miner still active after a version-nibble rejection")
+	}
+	if level != "ERROR" {
+		t.Fatalf("version rejection logged at %q, want ERROR", level)
+	}
+
+	for _, err := range []error{miner.ErrBadBlob, miner.ErrBadJobID, miner.ErrBadDiff} {
+		st = newActiveState()
+		handleRejectedPush(st, err, logf)
+		if !st.Active() {
+			t.Fatalf("miner stopped on transient frame error %v — must keep hashing the last job", err)
+		}
+		if level != "WARN" {
+			t.Fatalf("transient frame %v logged at %q, want WARN", err, level)
+		}
+	}
+	_ = msg
+}
+
+func TestThrottledLogfSuppressesRepeats(t *testing.T) {
+	var lines []string
+	logf := throttledLogf(time.Hour, func(level, format string, args ...interface{}) {
+		lines = append(lines, level+": "+fmt.Sprintf(format, args...))
+	})
+
+	logf("WARN", "same %s", "thing")
+	logf("WARN", "same %s", "thing")
+	logf("WARN", "same %s", "thing")
+	if len(lines) != 1 {
+		t.Fatalf("repeated message logged %d times within the interval, want 1: %v", len(lines), lines)
+	}
+	logf("ERROR", "different thing")
+	if len(lines) != 2 {
+		t.Fatalf("changed message was suppressed: %v", lines)
+	}
+	if got := lines[1]; got != "ERROR: different thing (2 repeats suppressed)" {
+		t.Fatalf("suppressed count missing: %q", got)
+	}
+	logf("WARN", "same %s", "thing")
+	if len(lines) != 3 {
+		t.Fatalf("message change back was suppressed: %v", lines)
 	}
 }
 

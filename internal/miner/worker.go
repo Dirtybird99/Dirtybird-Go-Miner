@@ -36,8 +36,11 @@ func Run(ctx context.Context, tid int, st *State, submits chan<- getwork.Submit,
 	for ctx.Err() == nil {
 		blob, jobid, target, epoch := st.Job()
 		if epoch == 0 || !st.Active() { // no live job yet
-			// ponytail: bounded cancellation latency avoids allocating a timer on
-			// every outage poll; use a state-change channel if 50 ms ever matters.
+			// A bare sleep keeps the outage poll allocation-free (time.After
+			// heap-allocates a timer per poll, and GC is off between the
+			// hourly forced collections); the cost is up to 50 ms of added
+			// cancellation latency. Use a state-change channel if that ever
+			// matters.
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}

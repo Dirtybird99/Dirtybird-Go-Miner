@@ -36,9 +36,15 @@ func TestWorkersUnderJobChurn(t *testing.T) {
 	}
 
 	var submitted atomic.Int64
+	var unstamped atomic.Int64
 	go func() {
-		for range submits {
+		for s := range submits {
 			submitted.Add(1)
+			// SetJob starts epochs at 1, so 0 means the worker never stamped
+			// the share and the writer's epoch gate would be inert
+			if s.Epoch == 0 {
+				unstamped.Add(1)
+			}
 		}
 	}()
 
@@ -55,6 +61,11 @@ func TestWorkersUnderJobChurn(t *testing.T) {
 			t.Errorf("SetJob: %v", err)
 			return
 		}
+		// alternate invalidation into the churn so workers race SetJob,
+		// Invalidate, and Submit concurrently under -race
+		if i%2 == 1 {
+			st.Invalidate()
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	<-ctx.Done()
@@ -66,6 +77,9 @@ func TestWorkersUnderJobChurn(t *testing.T) {
 	}
 	if st.Submitted.Load() == 0 {
 		t.Fatal("no shares submitted at difficulty 1")
+	}
+	if n := unstamped.Load(); n != 0 {
+		t.Fatalf("%d share(s) carried epoch 0 — workers are not stamping submits", n)
 	}
 	t.Logf("hashes=%d submitted=%d drained=%d epoch=%d",
 		st.TotalHashes.Load(), st.Submitted.Load(), submitted.Load(), st.Epoch())

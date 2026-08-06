@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"flag"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -74,8 +75,16 @@ func defaultPairMode() bool {
 	return runtime.GOARCH == "arm64" && astrobwt.PairHashSupported()
 }
 
+// defaultPinModeFor: pinning defaults on only where the affinity code can
+// pin every thread. Above 64 logical CPUs Windows splits processor groups
+// and pinCurrentThread bails per-thread, which would leave a PARTIAL pin —
+// worse than none.
+func defaultPinModeFor(goos, goarch string, ncpu int) bool {
+	return goos == "windows" && goarch == "amd64" && ncpu <= 64
+}
+
 func defaultPinMode() bool {
-	return runtime.GOOS == "windows" && runtime.GOARCH == "amd64" && runtime.NumCPU() <= 64
+	return defaultPinModeFor(runtime.GOOS, runtime.GOARCH, runtime.NumCPU())
 }
 
 func normalizedThreadCount(n int) int {
@@ -86,6 +95,46 @@ func normalizedThreadCount(n int) int {
 		n = maxThreads
 	}
 	return n
+}
+
+// throttledLogf wraps logf so a message that repeats at job cadence cannot
+// flood the log (or a HiveOS flash card): a changed message is forwarded
+// immediately, an unchanged one at most once per interval, with the
+// suppressed count appended. Not safe for concurrent use — the client calls
+// OnJob from its single reader goroutine.
+func throttledLogf(interval time.Duration, logf func(level, format string, args ...interface{})) func(level, format string, args ...interface{}) {
+	var lastMsg string
+	var lastAt time.Time
+	var suppressed int
+	return func(level, format string, args ...interface{}) {
+		msg := fmt.Sprintf(format, args...)
+		now := time.Now()
+		if msg == lastMsg && now.Sub(lastAt) < interval {
+			suppressed++
+			return
+		}
+		if suppressed > 0 {
+			logf(level, "%s (%d repeats suppressed)", msg, suppressed)
+		} else {
+			logf(level, "%s", msg)
+		}
+		lastMsg, lastAt, suppressed = msg, now, 0
+	}
+}
+
+// handleRejectedPush classifies a push that failed job validation. Only the
+// version-nibble failure means this miner cannot mine the current chain —
+// stop hashing until an update. Every other rejection (short blob, empty
+// jobid, zero difficulty) is the shape of a keepalive or in-band status
+// frame: any JSON object decodes into a Job with zeroed fields, and the last
+// good job is still mineable, so keep hashing it.
+func handleRejectedPush(st *miner.State, err error, logf func(level, format string, args ...interface{})) {
+	if errors.Is(err, miner.ErrBadVersion) {
+		st.Invalidate()
+		logf("ERROR", "rejected job push: %v", err)
+		return
+	}
+	logf("WARN", "ignored non-job frame: %v", err)
 }
 
 func parseFlags() *options {
@@ -271,6 +320,12 @@ func run() int {
 		Endpoint:     o.daemon,
 		Wallet:       o.wallet,
 		Submits:      submits,
+		// Invalidate-on-disconnect stops workers the moment the client KNOWS
+		// the link died. Detection is not instant: a silently dead link (no
+		// FIN/RST — mobile handoff, NAT timeout) only surfaces when the read
+		// deadline expires, so workers can grind a dead job for up to that
+		// ~20s. The residue is bounded by the read timeout, not by reconnect
+		// backoff.
 		OnDisconnect: st.Invalidate,
 		SubmitValid: func(s getwork.Submit) bool {
 			return st.Active() && st.Epoch() == s.Epoch
@@ -287,6 +342,7 @@ func run() int {
 			cons.Logf("DEBUG", format, args...)
 		}
 	}
+	rejectLog := throttledLogf(30*time.Second, cons.Logf)
 	client.OnJob = func(j getwork.Job) bool {
 		if o.debugFlag {
 			cons.Logf("DEBUG", "job %s height=%d diff=%d mb=%d blocks=%d rej=%d",
@@ -294,8 +350,7 @@ func run() int {
 		}
 		_, err := st.SetJob(j)
 		if err != nil {
-			st.Invalidate()
-			cons.Logf("ERROR", "rejected job push: %v", err)
+			handleRejectedPush(st, err, rejectLog)
 			return false
 		}
 		// The family CLIs surface share accounting only through the status

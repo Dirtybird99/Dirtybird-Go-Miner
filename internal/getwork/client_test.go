@@ -159,3 +159,80 @@ func TestSubmitValidationDropsStaleEpoch(t *testing.T) {
 		t.Fatalf("Discarded = %d, want 1", got)
 	}
 }
+
+// TestSubmitEpochGateAtSocketWrite drives the REAL writer loop, not the
+// predicate in isolation: a stale-epoch share fed through the live submit
+// channel must never reach the wire. Deleting the writer's submitIsCurrent
+// guard must turn this test red.
+func TestSubmitEpochGateAtSocketWrite(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	received := make(chan Submit, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = conn.WriteJSON(Job{JobID: "job-1", Height: 1})
+		for {
+			var s Submit
+			if err := conn.ReadJSON(&s); err != nil {
+				conn.Close()
+				return
+			}
+			received <- s
+		}
+	}))
+	defer srv.Close()
+
+	submits := make(chan Submit, 4)
+	jobs := make(chan Job, 4)
+	client := &Client{
+		Endpoint:    "ws://" + srv.Listener.Addr().String(),
+		Wallet:      "w",
+		Submits:     submits,
+		OnJob:       func(j Job) bool { jobs <- j; return true },
+		SubmitValid: func(s Submit) bool { return s.Epoch == 2 },
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { client.Run(ctx); close(done) }()
+
+	select {
+	case <-jobs: // session established
+	case <-ctx.Done():
+		t.Fatal("no job arrived before timeout")
+	}
+	submits <- Submit{JobID: "current", Epoch: 2}
+	submits <- Submit{JobID: "stale", Epoch: 1}
+	submits <- Submit{JobID: "current-2", Epoch: 2}
+
+	// The channel is FIFO and the writer is single-threaded, so receiving
+	// current-2 proves the stale share between them was processed — and
+	// skipped. Epoch is json:"-" and never serialized, so assert by jobid.
+	for i, want := range []string{"current", "current-2"} {
+		select {
+		case s := <-received:
+			if s.JobID != want {
+				t.Fatalf("wire message %d has jobid %q, want %q", i, s.JobID, want)
+			}
+		case <-ctx.Done():
+			t.Fatalf("share %q never reached the wire", want)
+		}
+	}
+	select {
+	case s := <-received:
+		t.Fatalf("stale share reached the wire: jobid %q", s.JobID)
+	default:
+	}
+	if got := client.Discarded.Load(); got != 1 {
+		t.Fatalf("Discarded = %d, want 1", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}

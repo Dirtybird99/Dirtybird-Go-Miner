@@ -40,8 +40,12 @@ type Client struct {
 
 	Connected atomic.Bool
 	SendFails atomic.Uint64
-	// Shares discarded at redial because they were found on a connection that
-	// no longer exists. See discardStaleSubmits.
+	// Shares dropped without reaching the wire, from either source: queued
+	// shares drained at redial (discardStaleSubmits), or shares rejected by
+	// SubmitValid at the socket write because their epoch went stale while
+	// buffered. With workers stopping on Invalidate the drain source is now
+	// rare; a growing count therefore usually means writes are backing up
+	// (slow socket, low difficulty), not reconnect churn.
 	Discarded atomic.Uint64
 }
 
