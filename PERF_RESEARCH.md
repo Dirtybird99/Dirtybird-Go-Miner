@@ -163,6 +163,49 @@ combined result to only +1.03% vs baseline; its second ABBA leg was effectively
 flat. The component SHA benchmark did not transfer to the integrated hash, so
 the change was reverted.
 
+## 2026-08-03 Rust/Zig parity audit
+
+The benchmark workload now matches the active Rust/Zig harnesses byte-for-byte.
+An aligned x2 stage comparison on the i7-13700HX explains nearly the whole gap:
+
+| Stage | Go x2 | Zig x2 |
+|---|---:|---:|
+| setup/prologue | ~1.6 us/hash | 1.4 us/hash |
+| wolf operation loop | ~46.1 us/hash | 37.6 us/hash |
+| descriptor emit + radix + materialize | **~433.7 us/hash** | **325.1 us/hash** |
+| final SHA-256 x2 | ~93.3 us/hash | 97.4 us/hash |
+| total | ~574.7 us/hash | 461.5 us/hash |
+
+Go's microsecond figures are inferred from its RDTSC stage shares and measured
+1.74 KH/s wall rate; Zig reports instrumented wall time directly. The important
+result is robust to that conversion: Go's existing x2 SHA is already at parity,
+while descriptor-SA work accounts for about 109 us/hash of a roughly 113
+us/hash total deficit. A new SHA kernel cannot close this gap.
+
+The current local pure-Zig builder uses an all-arena packed-run layout and
+pdqsort for collisions; the current Rust builder mirrors that broad shape and
+benefits from its standard stable slice sort. Neither property transfers as an
+automatic Go win:
+
+| Candidate | Result | Decision |
+|---|---:|---|
+| Full current Rust/Zig all-arena materializer port | -9.3% at pinned/high 1T | Reverted. Go's literal/merge special cases are cheaper under the Go compiler. |
+| `slices.SortFunc` only for group-runs above 25 | +0.46% in the clean pair | Reverted below the +2% gate. |
+| Unconditional eight-word current-layout arena copy | +1.47% center, paired +1.61%/+1.33% | Reverted below the +2% gate. |
+| Per-worker HIGHEST priority + execution-throttle opt-out under `--high` | +0.48% at 1T; +0.09% at 20T | Reverted as neutral. |
+| Fresh Go 1.26.5 PGO profile (60s, pinned/high 20T x1) | +0.73% at 1T x2; +0.17% at 20T x1 | Rejected; committed `default.pgo` retained. |
+
+All hash-path candidates passed V114/SAIS differential, KAT, fallback, and
+zero-allocation gates before timing. The materializer port and copy candidate
+also passed focused checkptr validation. The small positive copy result is not
+rounded into a win: the retention rule was set before testing at +2% with no
+more than 0.5% regression at the other target.
+
+The fresh-PGO gate used 45-second actual-elapsed legs, 20-second cooldowns,
+and B-C-C-B order at both targets. Paired deltas straddled zero (1T:
+-1.42%/+2.96%; 20T: -0.85%/+1.20%), which is exactly the noise pattern the
+predeclared median/target gate is intended to reject.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
@@ -183,5 +226,5 @@ the change was reverted.
 - `go test -tags v114stats ./internal/astrobwt`
 - `go test -run=^$ -bench='BenchmarkHash(V114|PairV114|SAIS)$' -benchmem -count=5 ./internal/astrobwt`
 - `scripts\bench-matrix.ps1 -Candidate <name>` for sustained results.
-- Keep a candidate only if median `BenchmarkHashV114` improves by at least 2%
-  and sustained `20 --pin --high` does not regress.
+- Keep a candidate only if it improves by at least 2% at either the 1T or 20T
+  target and regresses by no more than 0.5% at the other target.

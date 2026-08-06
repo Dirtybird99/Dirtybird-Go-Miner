@@ -17,10 +17,14 @@ func stageMark() uint64 { return rdtsc() }
 // stageLap accumulates t1-t0 into the stage counter and returns t1 so laps
 // chain without re-reading the TSC.
 func stageLap(stage int, t0 uint64) uint64 {
+	return stageLapN(stage, t0, 1)
+}
+
+func stageLapN(stage int, t0, hashes uint64) uint64 {
 	t1 := rdtsc()
 	stageCycles[stage].Add(t1 - t0)
 	if stage == stageSHA {
-		stageHashes.Add(1)
+		stageHashes.Add(hashes)
 	}
 	return t1
 }

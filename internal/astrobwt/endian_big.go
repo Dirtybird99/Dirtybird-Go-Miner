@@ -3,6 +3,8 @@
 
 package astrobwt
 
+import "unsafe"
+
 const LittleEndian = false
 const BigEndian = true
 

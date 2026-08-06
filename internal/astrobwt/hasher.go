@@ -52,7 +52,7 @@ func (h *Hasher) HashPair(a, b []byte) (ha, hb [32]byte) {
 	lb := astroBWTv3Stream(b, h.scratch2)
 	ts := stageMark()
 	ha, hb = sha256Sum256Pair(h.scratch.sa_bytes[:la*4], h.scratch2.sa_bytes[:lb*4])
-	stageLap(stageSHA, ts)
+	stageLapN(stageSHA, ts, 2)
 	return ha, hb
 }
 

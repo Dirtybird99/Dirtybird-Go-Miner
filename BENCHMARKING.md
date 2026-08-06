@@ -17,6 +17,56 @@ powershell -ExecutionPolicy Bypass -File scripts\bench-matrix.ps1 `
 Omitted paths remain recorded as "not checked out"; none of these external
 repositories are required to build or benchmark the miner.
 
+**Measurement discontinuity (2026-08):** the harness rewrite that aligned the
+workload with the Rust/Zig comparators changed three things at once — the input
+blob generation (Zig-matched xoshiro256++ stream with real big-endian nonces at
+bytes 43-46, replacing random blobs varied at bytes 0-1), the rate denominator
+(actual elapsed time including the join tail, replacing the nominal window), and
+the worker counter batch. Sustained figures recorded before this rewrite are not
+comparable to figures recorded after it — newer numbers read lower for the same
+build. Do not bridge comparisons across the rewrite; re-baseline instead.
+
+Also note `--bench` runs a 1-second warmup per thread count while `--sustained`
+starts cold (its first checkpoint row is labelled `ramp` for this reason), so
+the two modes are not directly comparable at equal thread counts.
+
+## Go / Rust / Zig Head-to-Head
+
+`scripts\bench-head-to-head.ps1` runs the same deterministic blob stream and
+nonce sequence in all three miners. Run x1 and x2 separately, then compare the
+best validated mode for each miner/thread count:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\bench-head-to-head.ps1 `
+  -GoBinary .\go-miner.exe `
+  -RustBinary "C:\path\to\dero-miner.exe" `
+  -ZigBinary "C:\path\to\bench.exe" `
+  -Pipeline x1 -Threads 1,20 -DurationSecs 120 -CooldownSecs 180 -PinHigh
+
+powershell -ExecutionPolicy Bypass -File scripts\bench-head-to-head.ps1 `
+  -GoBinary .\go-miner.exe `
+  -RustBinary "C:\path\to\dero-miner.exe" `
+  -ZigBinary "C:\path\to\bench2.exe" `
+  -Pipeline x2 -Threads 1,20 -DurationSecs 120 -CooldownSecs 180 -PinHigh
+```
+
+The runner uses balanced `Go-Rust-Zig-Zig-Rust-Go` ordering, hashes every
+artifact, records tool versions and explicit Rust environment controls, and
+writes raw logs, `runs.csv`, and `manifest.json` under ignored
+`bench-results\head-to-head\`. Rust experiment overrides are cleared for each
+run and the caller's original environment is restored afterward. The runner
+persists and rejects an x1/x2 banner mismatch, an unparseable rate, a nonzero
+exit, or a launch error. It also rejects an output path outside `bench-results`,
+a thread count outside 1-255, or a `-PinHigh` thread count above the frozen Zig
+comparator's 24-entry affinity map. `-DryRun` prints every command without
+executing it.
+
+Go, Rust, and Zig all start timing before worker creation and report actual
+elapsed time including the final batch/join tail. The Go workload is pinned by
+`TestBenchmarkWorkMatchesZigSeed`; it reproduces Zig's
+`DefaultPrng.init(12345 + tid)`, byte 47 thread id, and consecutive big-endian
+nonces at bytes 43-46.
+
 ## Matrix Run
 
 From the repo root:

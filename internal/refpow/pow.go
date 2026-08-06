@@ -2450,7 +2450,7 @@ func AstroBWTv3(input []byte) (outputhash [32]byte) {
 	} else {
 		var s [MAX_LENGTH * 4]byte
 		for i, c := range scratch.sa[:data_len] {
-			binary.LittleEndian.PutUint32(s[i<<1:], uint32(c))
+			binary.LittleEndian.PutUint32(s[i*4:], uint32(c))
 		}
 		scratch.hasher.Reset()
 		scratch.hasher.Write(s[:data_len*4])

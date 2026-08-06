@@ -28,14 +28,18 @@ func astroBWTv3(input []byte, scratch *ScratchData) (outputhash [32]byte) {
 		outputhash = sha256.Sum256(scratch.sa_bytes[:data_len*4])
 	} else {
 		var s [MAX_LENGTH * 4]byte
-		for i, c := range scratch.sa[:data_len] {
-			binary.LittleEndian.PutUint32(s[i<<1:], uint32(c))
-		}
+		writeLittleEndianSA(s[:data_len*4], scratch.sa[:data_len])
 		outputhash = sha256.Sum256(s[:data_len*4])
 	}
 	stageLap(stageSHA, ts)
 
 	return outputhash
+}
+
+func writeLittleEndianSA(dst []byte, sa []int32) {
+	for i, c := range sa {
+		binary.LittleEndian.PutUint32(dst[i*4:], uint32(c))
+	}
 }
 
 // astroBWTv3Stream runs every stage up to and including the suffix array:

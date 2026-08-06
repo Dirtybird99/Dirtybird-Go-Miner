@@ -67,6 +67,14 @@ jobs:
       - name: LUT differential
         if: matrix.os == 'ubuntu-latest'
         run: go test -tags lut ./internal/astrobwt -run '^TestLUTDifferentialVsReference$' -count=1
+      # No CI machine is big-endian, so endian_big.go files are otherwise
+      # never even compiled — a missing import shipped unnoticed once.
+      - name: Big-endian compile gate (s390x)
+        if: matrix.os == 'ubuntu-latest'
+        run: GOOS=linux GOARCH=s390x go build ./internal/... .
+      - name: Stage-stats accounting
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -tags stagestats ./internal/astrobwt -run '^TestStageStats' -count=1
       - name: Race
         run: go test -race -count=1 -timeout=30m ./internal/...
       - name: Shell hygiene
