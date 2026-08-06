@@ -135,6 +135,112 @@ func fusedRunPos(arena []uint32, r stage5Run, rel uint32) uint32 {
 	return arena[begin+rel]
 }
 
+// constantRunOrder orders an all-literal equal-key group by the closed form
+// available when the group's shared 3-byte key is one repeated byte c. Every
+// member p then sits inside a maximal run of c's ending at e (data[e+1] != c
+// or the run reaches logicalLen), and its suffix is c^(e-p+1) followed by
+// the bytes after the run. For members p1 < p2 of the SAME run the first
+// differing offset is e-p2+1, where suffix(p2) shows t = data[e+1] while
+// suffix(p1) still shows c (p1+(e-p2+1) <= e because p1 < p2): t > c orders
+// the run ascending by position, t < c descending, and t never equals c by
+// maximality. A run reaching logicalLen makes the shorter suffix a proper
+// prefix of the longer, so larger positions sort first — descending, the
+// same as t < c. Group members of one run are exactly the positions
+// [runStart, e-2] (any gap position carries the same key and would be a
+// member, and groups over 32 members never reach the literal path), so
+// delta-1 chains in position order are complete runs; distinct chains are
+// distinct runs and are merged with real suffix compares. Returns false
+// with the group untouched when the key is not a repeated byte.
+func constantRunOrder(view *stage4View, positions []uint32) bool {
+	n := len(positions)
+	if n > 32 { // the literal path never exceeds 32; guard the stack arrays
+		return false
+	}
+	c := view.data[positions[0]]
+	if view.data[positions[0]+1] != c || view.data[positions[0]+2] != c {
+		return false
+	}
+
+	var byPos [32]uint32
+	sorted := byPos[:n]
+	copy(sorted, positions)
+	for i := 1; i < n; i++ { // position order: cheap uint32 compares
+		p := sorted[i]
+		j := i
+		for j > 0 && sorted[j-1] > p {
+			sorted[j] = sorted[j-1]
+			j--
+		}
+		sorted[j] = p
+	}
+
+	var partStart [32]int
+	k := 0
+	for i := 0; i < n; i++ {
+		if i == 0 || sorted[i] != sorted[i-1]+1 {
+			partStart[k] = i
+			k++
+		}
+	}
+
+	var ordered, tmp [32]uint32
+	for pi := 0; pi < k; pi++ {
+		lo := partStart[pi]
+		hi := n
+		if pi+1 < k {
+			hi = partStart[pi+1]
+		}
+		m := sorted[hi-1]
+		e := m + 2 // the key guarantees c at m+1 and m+2
+		for e+1 < view.logicalLen && view.data[e+1] == c {
+			e++
+		}
+		if e+1 < view.logicalLen && view.data[e+1] > c {
+			copy(ordered[lo:hi], sorted[lo:hi])
+		} else {
+			for i := lo; i < hi; i++ {
+				ordered[i] = sorted[lo+hi-1-i]
+			}
+		}
+	}
+
+	if k > 1 {
+		// merge the per-run segments (k is small) with real suffix compares
+		var lens [32]int
+		for pi := 0; pi < k; pi++ {
+			hi := n
+			if pi+1 < k {
+				hi = partStart[pi+1]
+			}
+			lens[pi] = hi - partStart[pi]
+		}
+		src, dst := ordered[:n], tmp[:n]
+		dummy := 0
+		for k > 1 {
+			w, base := 0, 0
+			for i := 0; i < k; i += 2 {
+				if i+1 == k {
+					copy(dst[base:base+lens[i]], src[base:base+lens[i]])
+					lens[w] = lens[i]
+					w++
+					break
+				}
+				l, r := lens[i], lens[i+1]
+				mergeSortedPositionsAfterKey(view, src, base, base+l, base+l+r, dst, base, &dummy)
+				lens[w] = l + r
+				w++
+				base += l + r
+			}
+			k = w
+			src, dst = dst, src
+		}
+		copy(positions, src)
+		return true
+	}
+	copy(positions, ordered[:n])
+	return true
+}
+
 // tryWriteLiteralGroup handles equal-key groups of <=32 all-literal runs with
 // a stack insertion sort.
 func tryWriteLiteralGroup(view *stage4View, runs []stage5Run, sa []int32, outPos int) (int, bool) {
@@ -154,20 +260,24 @@ func tryWriteLiteralGroup(view *stage4View, runs []stage5Run, sa []int32, outPos
 		v114StatsAnalyzeBigGroup(view, positions[:count], 0)
 	}
 	cmps := 0
-	for i := 1; i < count; i++ {
-		pos := positions[i]
-		j := i
-		for j > 0 {
-			if V114StatsEnabled {
-				cmps++
+	if count < 17 || !constantRunOrder(view, positions[:count]) {
+		// small groups, and the rare large group whose key is not a
+		// repeated byte, take the general insertion sort
+		for i := 1; i < count; i++ {
+			pos := positions[i]
+			j := i
+			for j > 0 {
+				if V114StatsEnabled {
+					cmps++
+				}
+				if !suffixLessAfterKey(view, pos, positions[j-1]) {
+					break
+				}
+				positions[j] = positions[j-1]
+				j--
 			}
-			if !suffixLessAfterKey(view, pos, positions[j-1]) {
-				break
-			}
-			positions[j] = positions[j-1]
-			j--
+			positions[j] = pos
 		}
-		positions[j] = pos
 	}
 	if V114StatsEnabled {
 		v114StatsRecordLiteralCompares(count, cmps)
