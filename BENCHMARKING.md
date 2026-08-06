@@ -26,6 +26,10 @@ the worker counter batch. Sustained figures recorded before this rewrite are not
 comparable to figures recorded after it — newer numbers read lower for the same
 build. Do not bridge comparisons across the rewrite; re-baseline instead.
 
+Also note `--bench` runs a 1-second warmup per thread count while `--sustained`
+starts cold (its first checkpoint row is labelled `ramp` for this reason), so
+the two modes are not directly comparable at equal thread counts.
+
 ## Go / Rust / Zig Head-to-Head
 
 `scripts\bench-head-to-head.ps1` runs the same deterministic blob stream and

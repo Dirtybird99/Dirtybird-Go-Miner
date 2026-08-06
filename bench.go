@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/bits"
 	"os"
 	"runtime"
@@ -176,11 +177,18 @@ func printStageStats() {
 	}
 }
 
+// validSecs rejects nonpositive windows and values whose nanosecond
+// conversion overflows int64 — an overflowed window ends in milliseconds and
+// reports a plausible-looking rate for a run that never warmed up.
+func validSecs(secs int) bool {
+	return secs > 0 && int64(secs) <= math.MaxInt64/int64(time.Second)
+}
+
 // runSustained runs all threads for a fixed wall window — the honest
 // hybrid-CPU number.
 func runSustained(threads, secs int, pin bool, backend astrobwt.Backend, pair bool) int {
-	if secs <= 0 {
-		fmt.Fprintln(os.Stderr, "--secs must be greater than zero")
+	if !validSecs(secs) {
+		fmt.Fprintln(os.Stderr, "--secs must be a positive number of seconds")
 		return 1
 	}
 	var pinOrder []int
@@ -222,7 +230,9 @@ func runSustained(threads, secs int, pin bool, backend astrobwt.Backend, pair bo
 		rate := float64(count-lastCount) / now.Sub(lastTime).Seconds()
 		label := fmt.Sprintf("%ds", int(checkpoint/time.Second))
 		if i == 0 {
-			label = "peak"
+			// the first interval starts before worker spawn/pinning, so it
+			// measures ramp, not peak
+			label = "ramp"
 		} else if checkpoint >= 120*time.Second {
 			label = "120+"
 		}
@@ -244,8 +254,8 @@ func runSustained(threads, secs int, pin bool, backend astrobwt.Backend, pair bo
 // plain status record per tick) and its stability measured. No daemon
 // involved; nothing is ever submitted.
 func runStatBench(cons *console.Console, threads, secs int, o *options) int {
-	if secs <= 0 {
-		fmt.Fprintln(os.Stderr, "--secs must be greater than zero")
+	if !validSecs(secs) {
+		fmt.Fprintln(os.Stderr, "--secs must be a positive number of seconds")
 		return 1
 	}
 	st := &miner.State{}
