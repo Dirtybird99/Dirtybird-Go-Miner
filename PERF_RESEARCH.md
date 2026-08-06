@@ -507,6 +507,30 @@ methodology: **never start a measured leg immediately after a correctness
 burn — cooldown first, always** (the contaminated screen above is the
 in-repo example).
 
+### 2026-08-06 amendment: gate relaxed by the user; closed form RETAINED
+
+The user relaxed the retention policy (see Gates For Any Candidate) and
+directed keeping the constant-run closed form. The candidate was restored
+verbatim (revert of the revert — no hand edits to the gated content) and
+re-passed the full gate list on the restored tree (suite, tagged suite,
+-race, million-hash differential). The one open measurement, the 20T
+sustained no-regression check, ran as an 8-leg Thue-Morse block (240 s
+legs, cooldown before the block per the lesson above):
+
+- Drift-adjusted treatment: **+3.04% ± 1.52 pp, 95% CI [-1.09%, +7.34%]**,
+  one-sided lower bound -0.14%.
+- Pre-declared retention rule — no demonstrated regression beyond -0.5%
+  (point >= -0.5% AND CI upper bound not below -0.5%) — **SATISFIED**;
+  combined with the proven micro effect (+1.29% [+0.67%, +1.92%]), the
+  candidate is **RETAINED**.
+- HONESTY CAVEAT: this block's SE (1.52 pp) is ~5x the instrument's
+  calibrated noise — legs 6-7 (both base) sat >1 KH/s below family,
+  indicating a mid-block disturbance. The block therefore establishes
+  no-regression, NOT a confirmed 20T improvement; the +3.0% point estimate
+  is directionally consistent with the micro win but unproven. A clean
+  re-measurement on an idle box would tighten it; retention does not
+  depend on it.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
@@ -527,5 +551,9 @@ in-repo example).
 - `go test -tags v114stats ./internal/astrobwt`
 - `go test -run=^$ -bench='BenchmarkHash(V114|PairV114|SAIS)$' -benchmem -count=5 ./internal/astrobwt`
 - `scripts\bench-matrix.ps1 -Candidate <name>` for sustained results.
-- Keep a candidate only if it improves by at least 2% at either the 1T or 20T
-  target and regresses by no more than 0.5% at the other target.
+- Retention (relaxed by the user, 2026-08-06; previously "at least 2% at
+  either target"): keep a candidate that is provably positive at either
+  target — one-sided 95% lower bound above the ~0.6% attribution floor on
+  the paired instruments — provided the other target shows no demonstrated
+  regression beyond 0.5% (point >= -0.5% and CI upper bound not below
+  -0.5%). Correctness gates are unchanged and non-negotiable.
