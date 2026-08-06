@@ -80,13 +80,21 @@ everywhere. The tag is kept so the kernel can be re-measured on AMD, where the
 
 ## Ranked Miner Backlog
 
-1. Use `-tags v114stats` to measure v114 group-count and equal-key merge
-   distributions under real sustained runs.
-2. If literal equal-key groups above the current `<=32` fast path are frequent,
-   benchmark threshold variants before changing production code.
-3. Revisit the stage-4 short-run cutoff near `stage4ShortRunMax = 25` only with
-   a median microbench improvement and sustained `20 --pin --high`
-   confirmation.
+1. ~~Use `-tags v114stats` to measure v114 group-count and equal-key merge
+   distributions under real sustained runs.~~ **DONE 2026-08-05** — see the
+   campaign section below for the distributions.
+2. ~~If literal equal-key groups above the current `<=32` fast path are
+   frequent, benchmark threshold variants before changing production code.~~
+   **CLOSED 2026-08-05: population too small** (all-literal >32 groups are
+   bounded above by 9.6 large-fallback merges/hash, below the pre-registered
+   18/hash trigger).
+3. ~~Revisit the stage-4 short-run cutoff near `stage4ShortRunMax = 25`.~~
+   **CLOSED 2026-08-05: all four pre-registered variants (16/20/32/40) are
+   micro nulls** — best +0.13% [-0.56%, +0.83%] (df=11 criticals; the
+   originally-quoted [-0.53%, +0.80%] used df=19), every CI excludes the +2%
+   gate; the trigger fired (17-25-group runs are 1.81% of template runs) but
+   the population's work share is too small to matter. Binary-distinctness
+   positive control passed (all five arms hash differently). Keep 25.
 4. Add an optional `racedetector` smoke note only as a safety workflow; do not
    put it in `go.mod`.
 5. Consider assembly only after a profile shows a byte-search or bulk-copy loop
@@ -101,11 +109,14 @@ everywhere. The tag is kept so the kernel can be re-measured on AMD, where the
    MSB rank marking is untried, and v114 has no rank array. Do **not** swap the SA
    algorithm either: tnn-miner vendors libdivsufsort, the same family as v114, and
    SA-IS/GSACA/CaPS-SA wins are all large-input or multi-threaded regimes.
-7. The honest remaining SA target is `writeFusedRunsToSA` (48.4% cum). Its three costs are
-   the radix sort (restructure already dead, ledger rows 13-14), the arena `memmove`
-   (specialization dead twice, above), and the group scan. A win here needs to *remove*
-   work — e.g. emit records already in SA order so the final copy disappears — not to
-   micro-tune the copy.
+7. ~~The honest remaining SA target is `writeFusedRunsToSA` (48.4% cum)...~~
+   **CLOSED 2026-08-05.** The "emit in SA order" idea was implemented as a
+   fused byte0-scatter materializer, passed every correctness gate, and was
+   REJECTED: 1T null, 20T sustained -1.17% [-1.94%, -0.39%]. See the campaign
+   section — the scan's apparent cost is the equal-key merges, which
+   correctness requires, and the scatter loses the sequential SA write
+   stream. The only remaining stage-5 surface is the merge comparator
+   itself; nothing bookkeeping-shaped is left here.
 
 ### Where the time actually goes (1T CPU profile, `BenchmarkHashV114`, 3000x)
 
@@ -205,6 +216,210 @@ The fresh-PGO gate used 45-second actual-elapsed legs, 20-second cooldowns,
 and B-C-C-B order at both targets. Paired deltas straddled zero (1T:
 -1.42%/+2.96%; 20T: -0.85%/+1.20%), which is exactly the noise pattern the
 predeclared median/target gate is intended to reject.
+
+## 2026-08-05 SA-stage campaign — calibration and premise checks
+
+Campaign plan: stats-first, then a structural rewrite of the stage-5
+materializer ("scatter positions, not records"). Before any implementation,
+three premise checks ran on the `perf/sa-campaign` branch.
+
+### Stage-bracket coverage verified (the 109 µs deficit is real)
+
+The 2026-08-03 stage table inferred Go's per-stage microseconds from RDTSC
+shares times a wall rate, which cannot reveal unbracketed time on its own. The
+check: divide summed bracketed cycles/hash by the same run's wall ns/hash and
+compare the implied TSC rate across two unrelated regimes.
+
+| leg | cyc/hash (sum) | wall ns/hash-thread | implied TSC |
+|---|---:|---:|---:|
+| 1T x2, 120 s | 1,290,276 | 560,067 | **2.304 GHz** |
+| 20T x1, 300 s | 2,476,408 | 1,075,269 | **2.303 GHz** |
+
+Agreement to 0.04% across regimes with different SHA shares and contention
+means the brackets cover essentially all wall time (any fixed unbracketed
+fraction would have to scale identically in both regimes to fake this). The
+descriptor-SA deficit premise stands. Stage shares this run: 20T x1 SA 77.6% /
+SHA 16.1% / wolf 6.1%; 1T x2 SA 75.1% / SHA 16.6% / wolf 8.1%.
+
+### v114 descriptor distributions under sustained load (backlog 1 done)
+
+20T x1, 300 s, 5,581,504 hashes (1T x2 leg agrees on every share to two
+decimals — positive control across different nonce streams):
+
+- Template runs: 61.8/hash. Group-size shares: 1 g 26.7%, 2 g 17.2%, 3 g 12.5%,
+  4 g 9.6%, 5-8 g 21.0%, 9-16 g 10.9%, **17-25 g 1.81%, 26+ g 0.29%**.
+- Equal-key merge groups per hash: literal 2-4: 197.4, literal 5-8: 20.4,
+  literal 9-16: 10.8, literal 17-32: 13.4, two-run: 79.4, large fallback: 9.6.
+  Total ~331 collision groups/hash involving ~1,500-1,700 records (bucket
+  midpoints) — small against
+  the ~45k records/hash estimate, so a fixup-style materializer pays its
+  collision cost rarely.
+- v114 fallback hashes: 0 in both legs.
+
+**Backlog 2 CLOSED (population too small):** all-literal groups above the <=32
+fast path are bounded above by large-fallback merges = 9.6/hash, below the
+pre-registered >=18/hash trigger. No threshold candidate.
+
+**Backlog 3 TRIGGERED:** runs of 17-25 groups are 1.81% of template runs,
+above the pre-registered 1% trigger (26+ adds 0.29%). A `stage4ShortRunMax`
+variant A/B (16/20/32/40) was owed (since run and CLOSED — all four null;
+see the backlog list); expectation stayed modest — the column-255
+sort is a small fraction of a run's emit work.
+
+### Measurement instrument calibrated (A/A with a layout-null arm)
+
+Micro, 20 alternating (base, layout-null) couples, each invocation a
+pre-built test binary pinned by process affinity 0x1 at High priority:
+
+- Within-couple pairing collapses the old 8-10% CoV to a ~0.15% standard
+  error on the mean effect — the historical CoV was unpaired pooling plus
+  rebuild/migration noise, not hashing noise.
+- The semantically-null layout change measures **+0.28% [-0.03%, +0.58%]**:
+  the attribution floor on this box/toolchain. Micro effects below ~0.6%
+  cannot be attributed to code semantics; the +2% gate keeps 3-6x margin.
+  CAVEAT (review): the campaign's couples ran base-then-cand every couple,
+  which perfectly aliases a constant position effect (cold-core turbo,
+  first-touch) with the arm effect — so the +0.28% may be layout, position,
+  or both; historical runs cannot distinguish. The script now alternates arm
+  order per couple, making the position component average out. Treat the
+  floor as an attribution limit, not necessarily a layout property.
+
+Sustained A/A (8-leg Thue-Morse, 240 s legs, 20T, steady-state window):
+null effect **+0.275% ± 0.26 pp, 95% CI [-0.45%, +1.00%]**, one-sided lower
+bound -0.28% — the instrument resolves the +2% gate with wide margin and
+correctly rejects a null. The +0.275% point estimate is consistent with the
+micro's floor (both CIs also cover zero — read as compatibility, not
+replication). Drift is session-specific, not a box property: this session
+fitted -0.37%/leg linear, while the candidate session two hours later fitted
++0.365%/leg — opposite sign, which is exactly why the design balances drift
+rather than assuming its shape. Run: `bench-results/thue-morse/`
+20260805-161156-aa-20t. See `scripts/bench-thue-morse.ps1` +
+`scripts/analyze-thue-morse.py` for the design (quadratic-drift-balanced
+order, steady-state window, drift-adjusted fit with 4 residual df) and
+`scripts/bench-micro-couples.ps1` for the paired micro screen.
+WINDOW ERRATUM (review): the recorded runs' steady-state window was
+[90 s, leg-end], not the documented [120 s, leg-end] — the t=120 s
+checkpoint's interval covers [90 s, 120 s] ramp and was included. Refits on
+the strict window change no verdict (A/A +0.275% → +0.270%; the candidate
+-1.171% → -1.087%, CI still excluding zero). The script now parses checkpoint
+end times and excludes it.
+TSC anchor (review, measured directly): this box's invariant TSC is
+2.3040 GHz (38.4 MHz crystal x 60), so the implied-TSC agreement below is an
+ABSOLUTE bound — unbracketed wall time is 0.009-0.041%, not merely equal
+across regimes. Retention rule for this campaign: point >= +2%
+at 20T sustained AND one-sided 95% lower bound > 0 there AND no demonstrated
+regression beyond -0.5% at the secondary target.
+
+### Ceiling probes (backlog 7 go/no-go) — GO
+
+Two deliberately-wrong builds bound what a scatter-style materializer can
+remove before any real implementation. Both were verified live by the
+positive control (`TestV114DifferentialVsSAIS` FAILS on both), built with
+`GOAMD64=v3` + `default.pgo`, and measured with 20 pinned P-core couples
+against the same base binary:
+
+| probe | removes | effect vs base |
+|---|---|---:|
+| B: flat-loop materializer, radix intact | group scan incl. all merges | **+12.61% [+12.05%, +13.17%]** |
+| A: flat loop AND no pass 3/swap | scan + pass-3 record scatter | **+17.15% [+16.71%, +17.59%]** |
+
+Attribution in ONE unit space — work share removed, converted from the
+speedups (share = 1 − 1/(1+s)): probe B removed **11.19%** of hash work,
+probe A **14.64%**, so the pass-3 increment is **3.45%** by definition
+(A − B is the increment, not an independence test — additivity was never
+probed separately). The pre-registered tripwires were speedup-space numbers:
+below the +20% "measurement is wrong" bound (the reconstructed work-share
+ceiling, 14.9% flat + 14.0%/3 ≈ 19.6%, corresponds to a +24.3% speedup, so
+the tripwire was in fact looser than it read) and far above the +1% kill
+signal.
+
+**Post-hoc correction (found in review):** the go/no-go arithmetic below
+originally mixed speedup-space and work-share numbers, and used a "~8% of
+hash" merge-cost prior from the old profile's cumulative arithmetic. That
+prior is SUPERSEDED by this campaign's own measurement — the candidate's 1T
+null against probe B implies the merges are ~11.2% of hash work, nearly the
+whole scan-side removal. Computed consistently even on the optimistic 8%
+prior, the candidate expectation was **~+0.5% to +1.5% at 1T** — borderline
+against the +2% gate BEFORE implementation, not the "~+6-7%" recorded at the
+time. The decision to implement was made on the inconsistent arithmetic; the
+measured rejection below stands on its own regardless. Probes were
+working-tree-only and are fully reverted; this table is their record.
+
+### Fused-scatter materializer ("scatter positions, not records") — measured, REJECTED, backlog 7 closed
+
+The full candidate was implemented (commit `1f64e23`, reverted in history —
+kept for a possible AMD revisit): byte0 histogram accumulates position counts,
+two radix passes instead of three, the third pass replaced by a materializing
+scatter through 256 per-bucket cursors, equal-key collisions chain-linked and
+repaired by a fixup pass reusing the existing merge helpers. Every correctness
+gate passed first try: full suite, tagged suite + a fixup-branch coverage
+test, `-race`, and the million-hash differential (0 mismatches, 0 fallbacks).
+
+Measured against its parent commit (`GOAMD64=v3`, `default.pgo`):
+
+| instrument | effect |
+|---|---:|
+| 1T micro, 20 couples, P-core | **-0.01% [-0.55%, +0.53%]** (null) |
+| 1T micro, 12 couples, E-core | +0.13% [-0.18%, +0.44%] (null; df=11 criticals) |
+| 1T micro, 12 couples, P-core, `-pgo=off` both arms | +0.37% [-0.55%, +1.29%] (null, df=11; the +0.38 pp shift vs the PGO pair has SE ~0.49 pp — not distinguishable from zero, and either way not load-bearing) |
+| **20T sustained, 8-leg Thue-Morse, steady-state** | **-1.17% [-1.94%, -0.39%] — significant regression** |
+
+**The attribution finding (why the +17% ceiling did not survive):** the
+ceiling probes deleted the equal-key merges along with the scan; the real
+candidate must keep them. The 1T null against probe B's +12.6% means the
+scan's apparent cost was almost entirely the ~331 merge groups/hash (suffix
+compares over wolf's highly repetitive output), not the bookkeeping around
+them — the branch ladder, key compares, and record re-read are nearly free
+next to them. And at 20T the scatter actively hurts: the old writer emits one
+strictly sequential, hardware-prefetched SA write stream, while the scatter
+turns that into 256-way scattered RFOs and the fixup adds copy-out traffic —
+exactly the axis L3 contention punishes.
+
+Consequences, all closed:
+- **Backlog 7 is CLOSED.** The removable-looking stage-5 surface is merge
+  work that correctness requires; bookkeeping restructures cannot pay.
+- **B2 (collision-flag precompute) and B3 (offset-array split) are dead** by
+  the same finding — both remove strictly less than the full scan removal
+  that already measured null at 1T, and keep the regressive scatter (B3) or
+  nothing (B2) at 20T.
+- The only surface left in stage 5 is the **merge comparator itself**
+  (~12% of hash across ~331 groups): any future candidate must cheapen
+  suffix comparison, not descriptor bookkeeping.
+
+### Campaign close-out notes
+
+- **Underpowered-gate hypothesis for older ledger rows:** every pre-2026-08-05
+  sustained verdict was produced by a 4-leg ABBA design whose null
+  distribution (inferred — the campaign's A/A used the 8-leg design, whose
+  measured SE bounds the ABBA design from below) spans roughly ±1 pp and
+  whose CI on the repo's one KEPT candidate spanned zero. Some past
+  "confident" dead ends may have been real sub-2% effects in either
+  direction. Under the standing strict +2% gate this changes no decision,
+  but do not cite old point estimates as precise magnitudes.
+- **The "+1.47% unconditional eight-word arena copy" row** records no
+  protocol and no site; the checkptr mention suggests the stage-5 sa copy
+  (the unsafe alias side) rather than the emit-side arena append, but this
+  could not be pinned down from the repo. It remains shelved under the
+  user's strict-gate policy either way.
+- **Campaign net result:** no perf candidate retained. The durable
+  deliverables are the corrected comparator-aligned harness, the calibrated
+  paired instruments (couple-based micro, Thue-Morse sustained, A/A
+  layout-null floor ~0.3%), five backlog items closed with data, and the
+  attribution finding that stage-5's remaining cost is merge-comparator
+  work, not bookkeeping.
+
+### Emit slice-header hoist — measured, rejected
+
+The singleton append in `emitFullGroupRunGeneric` reloads the full three-word
+`v.runs` header from memory per record (`-gcflags=-S` shows the ptr/len/cap
+loads; the `appendOrderGroup` call in the other branch forces the round trip
+at the loop merge point). Hoisting local `runs`/`arena` slices through the
+column loop — threading them through `appendOrderGroup` and writing back on
+success only — measured **-0.38% [-0.98%, +0.23%]** over 20 pinned P-core
+couples. The reload is a same-address store-forwarded L1 hit costing ~1-2
+cycles, and carrying two extra live slice headers through the
+register-hungry induction re-sort costs at least as much back. The effect
+sits inside the ±0.3% layout floor: a null, not a win. Reverted.
 
 ## Closed Questions
 
