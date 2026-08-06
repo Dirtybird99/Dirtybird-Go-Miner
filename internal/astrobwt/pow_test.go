@@ -1,6 +1,7 @@
 package astrobwt
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
@@ -43,6 +44,26 @@ func TestWriteLittleEndianSA(t *testing.T) {
 	writeLittleEndianSA(dst, []int32{0x01020304, -1, 0x11223344})
 	if got, want := hex.EncodeToString(dst), "04030201ffffffff44332211"; got != want {
 		t.Fatalf("serialized SA = %s, want %s", got, want)
+	}
+}
+
+// TestWriteLittleEndianSAMatchesAliasView exercises the exact call-site
+// pattern of the big-endian branch (writeLittleEndianSA over scratch.sa[:n]
+// into a [MAX_LENGTH*4]byte destination) and requires it to reproduce the
+// sa_bytes unsafe alias byte for byte. The big-endian branch itself never
+// runs on a tested platform, so this is the only executable check of its
+// slice bounds and layout.
+func TestWriteLittleEndianSAMatchesAliasView(t *testing.T) {
+	scratch := NewScratchData()
+	for i := range scratch.sa {
+		scratch.sa[i] = int32(uint32(i)*2654435761 + 12345)
+	}
+	for _, n := range []int{1, 255, int(MAX_LENGTH)} {
+		var s [MAX_LENGTH * 4]byte
+		writeLittleEndianSA(s[:n*4], scratch.sa[:n])
+		if !bytes.Equal(s[:n*4], scratch.sa_bytes[:n*4]) {
+			t.Fatalf("n=%d: serialized SA differs from the sa_bytes alias view", n)
+		}
 	}
 }
 

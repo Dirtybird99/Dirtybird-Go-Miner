@@ -57,11 +57,19 @@ jobs:
           echo "version=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Gate
+        shell: bash
         run: |
+          set -euo pipefail
           go vet -mod=readonly ./...
           go test -mod=readonly ./...
-          V114_GATE_HASHES=1000008 go test -mod=readonly -count=1 -timeout=30m \
-            -run '^TestV114MillionHashGate$' ./internal/astrobwt
+          # The differential gate must PROVE it ran: a renamed test exits 0
+          # with "no tests to run" and a renamed env var exits 0 via t.Skip,
+          # so require the test's own success line in the output. 250008
+          # hashes is sized for a 4-vCPU hosted runner (~6 min); the
+          # million-hash run remains the local pre-release standard.
+          V114_GATE_HASHES=250008 go test -mod=readonly -count=1 -timeout=30m -v \
+            -run '^TestV114MillionHashGate$' ./internal/astrobwt | tee v114gate.log
+          grep -q "V114 GATE: .* hashes matched" v114gate.log
           go test -mod=readonly -race -count=1 -timeout=30m ./internal/...
           bash config/test-h-stats.sh
 

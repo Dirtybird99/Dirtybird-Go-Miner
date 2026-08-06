@@ -257,7 +257,7 @@ foreach ($threadCount in $threadCounts) {
         $observedPipeline = Get-ObservedPipeline $minerName $outputText
         $khs = Get-Khs $minerName $outputText
         $khsParsed = -not [double]::IsNaN($khs)
-        $recordedKhs = if ($khsParsed) { $khs } else { $null }
+        $elapsedSeconds = ($ended - $started).TotalSeconds
         $failure = if ($launchError) {
             "launch error: $launchError"
         } elseif ($exitCode -ne 0) {
@@ -266,9 +266,16 @@ foreach ($threadCount in $threadCounts) {
             "requested $Pipeline but observed '$observedPipeline'"
         } elseif (-not $khsParsed) {
             "could not parse final KH/s"
+        } elseif ($elapsedSeconds -lt 0.8 * $DurationSecs) {
+            # a miner that ignores the duration argument produces a
+            # real-looking rate from a run too short to have warmed up
+            "leg ended after {0:n2}s against a {1}s window" -f $elapsedSeconds, $DurationSecs
         } else {
             ""
         }
+        # a failed leg records no rate: the CSV must never carry a plausible
+        # number beside a non-empty error
+        $recordedKhs = if ($khsParsed -and -not $failure) { $khs } else { $null }
 
         $runs.Add([pscustomobject]@{
             sequence  = $sequence
@@ -278,7 +285,7 @@ foreach ($threadCount in $threadCounts) {
             observedPipeline = $observedPipeline
             khs       = $recordedKhs
             started   = $started.ToString("o")
-            elapsed   = ($ended - $started).TotalSeconds
+            elapsed   = $elapsedSeconds
             exitCode  = $exitCode
             error     = $failure
             command   = $command
