@@ -30,13 +30,36 @@ foreach ($exe in @($BaseExe, $CandExe)) {
     if (-not (Test-Path $exe)) { throw "binary not found: $exe" }
 }
 
+$strays = Get-Process -Name stabbench, bench2_pgo, dero-v114, "gm_*", "go-miner*" -ErrorAction SilentlyContinue
+if ($strays) { throw "stray bench process running: $($strays.ProcessName -join ', ')" }
+
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $outDir = Join-Path $OutRoot "$stamp-$Label"
 New-Item -ItemType Directory -Force $outDir | Out-Null
+# `go version -m` stamps neither -pgo nor a revision for `go test -c`
+# binaries, so content hashes are the only proof the arms differ.
 go version -m $BaseExe *> (Join-Path $outDir "base-goversion.txt")
 go version -m $CandExe *> (Join-Path $outDir "cand-goversion.txt")
-"label=$Label couples=$Couples bench=$Bench benchtime=$BenchTime affinity=0x$($AffinityMask.ToString('x')) started=$(Get-Date -Format o)" |
-    Set-Content (Join-Path $outDir "env.txt")
+$baseHash = (Get-FileHash -Algorithm SHA256 $BaseExe).Hash
+$candHash = (Get-FileHash -Algorithm SHA256 $CandExe).Hash
+@(
+    "label=$Label couples=$Couples bench=$Bench benchtime=$BenchTime affinity=0x$($AffinityMask.ToString('x')) started=$(Get-Date -Format o)"
+    "base=$BaseExe sha256=$baseHash"
+    "cand=$CandExe sha256=$candHash"
+    "armsIdentical=$($baseHash -eq $candHash)"
+) | Set-Content (Join-Path $outDir "env.txt")
+
+# Two-sided / one-sided 95% t criticals by residual df. Hardcoding one df
+# silently mis-sizes the CI whenever -Couples changes.
+$tTable = @{
+    2 = @(4.303, 2.920); 3 = @(3.182, 2.353); 4 = @(2.776, 2.132)
+    5 = @(2.571, 2.015); 6 = @(2.447, 1.943); 7 = @(2.365, 1.895)
+    8 = @(2.306, 1.860); 9 = @(2.262, 1.833); 10 = @(2.228, 1.812)
+    11 = @(2.201, 1.796); 12 = @(2.179, 1.782); 13 = @(2.160, 1.771)
+    14 = @(2.145, 1.761); 15 = @(2.131, 1.753); 16 = @(2.120, 1.746)
+    17 = @(2.110, 1.740); 18 = @(2.101, 1.734); 19 = @(2.093, 1.729)
+    20 = @(2.086, 1.725); 24 = @(2.064, 1.711); 29 = @(2.045, 1.699)
+}
 
 function Invoke-Arm([string]$exe, [string]$name, [int]$couple) {
     $log = Join-Path $outDir ("c{0:d2}-{1}.log" -f $couple, $name)
@@ -60,8 +83,17 @@ function Invoke-Arm([string]$exe, [string]$name, [int]$couple) {
 
 $rows = @()
 for ($i = 1; $i -le $Couples; $i++) {
-    $b = Invoke-Arm $BaseExe "base" $i
-    $c = Invoke-Arm $CandExe "cand" $i
+    # Alternate which arm runs first: a fixed base-then-cand order puts every
+    # base in an odd slot, perfectly aliasing any constant position effect
+    # (cold-start turbo, first-touch) with the arm effect. Alternation makes
+    # that component average out and become estimable.
+    if ($i % 2 -eq 1) {
+        $b = Invoke-Arm $BaseExe "base" $i
+        $c = Invoke-Arm $CandExe "cand" $i
+    } else {
+        $c = Invoke-Arm $CandExe "cand" $i
+        $b = Invoke-Arm $BaseExe "base" $i
+    }
     $ratio = [math]::Log($b / $c)   # >0 means candidate is faster (fewer ns/op)
     $rows += [pscustomobject]@{
         couple = $i; baseNs = $b; candNs = $c
@@ -76,8 +108,11 @@ $lr = $rows | ForEach-Object logRatio
 $mean = ($lr | Measure-Object -Average).Average
 $sd = [math]::Sqrt((($lr | ForEach-Object { [math]::Pow($_ - $mean, 2) }) | Measure-Object -Sum).Sum / ($lr.Count - 1))
 $se = $sd / [math]::Sqrt($lr.Count)
-# t crit for df=19: 2.093 two-sided 95%, 1.729 one-sided 95%.
-$t2 = 2.093; $t1 = 1.729
+$df = $lr.Count - 1
+if (-not $tTable.ContainsKey($df)) {
+    throw "no t critical tabulated for df=$df; use a couple count whose df is in the table"
+}
+$t2 = $tTable[$df][0]; $t1 = $tTable[$df][1]
 $pct = { param($v) 100 * ([math]::Exp($v) - 1) }
 $summary = @(
     "couples=$($lr.Count) affinity=0x$($AffinityMask.ToString('x'))"

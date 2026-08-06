@@ -9,11 +9,12 @@
 # position.
 #
 # Per leg the script records every checkpoint line and derives a steady-state
-# rate from the intervals ending at t >= 150s (i.e. the window [120s, LegSecs]),
-# excluding the ramp the whole-window figure averages in. Raw logs, legs.csv,
-# per-arm medians, and `go version -m` provenance for both binaries land in the
-# output directory. Analysis beyond medians (drift fit, CI) is left to the
-# caller — this script only produces the data.
+# rate from the intervals ENDING strictly after t=120s (the window
+# [120s, LegSecs]) — the t=120s checkpoint itself is excluded because its
+# interval covers [90s, 120s], which is still ramp. Raw logs, legs.csv,
+# per-arm medians, and provenance (SHA256 of both binaries + `go version -m`)
+# land in the output directory. Analysis beyond medians (drift fit, CI) is
+# left to the caller — this script only produces the data.
 
 param(
     [Parameter(Mandatory = $true)][string]$BaseExe,
@@ -39,21 +40,33 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $outDir = Join-Path $OutRoot "$stamp-$Label"
 New-Item -ItemType Directory -Force $outDir | Out-Null
 
-# Provenance: embedded build info for both arms, plus environment.
+# Provenance: embedded build info plus content hashes for both arms —
+# `go version -m` alone cannot distinguish two `go test -c` binaries (it
+# stamps neither -pgo nor a revision for them), so the hashes are the only
+# proof the arms differ.
 go version -m $BaseExe *> (Join-Path $outDir "base-goversion.txt")
 go version -m $CandExe *> (Join-Path $outDir "cand-goversion.txt")
+$baseHash = (Get-FileHash -Algorithm SHA256 $BaseExe).Hash
+$candHash = (Get-FileHash -Algorithm SHA256 $CandExe).Hash
 @(
     "label=$Label"
     "threads=$Threads legSecs=$LegSecs cooldownSecs=$CooldownSecs extraArgs=$ExtraArgs"
-    "base=$BaseExe"
-    "cand=$CandExe"
+    "base=$BaseExe sha256=$baseHash"
+    "cand=$CandExe sha256=$candHash"
+    "armsIdentical=$($baseHash -eq $candHash)"
     "host=$env:COMPUTERNAME"
     "started=$(Get-Date -Format o)"
 ) | Set-Content (Join-Path $outDir "env.txt")
 
-# Refuse to run alongside known bench-family strays.
-$strays = Get-Process -Name stabbench, bench2_pgo, dero-v114 -ErrorAction SilentlyContinue
-if ($strays) { throw "stray bench process running: $($strays.ProcessName -join ', ')" }
+# Refuse to run alongside bench-family strays — checked before the warm-up
+# AND between every leg (a process started mid-block poisons the later legs;
+# this workspace has retracted results over exactly that). The campaign's own
+# binaries are safe to include because legs run synchronously.
+function Assert-NoStrays {
+    $strays = Get-Process -Name stabbench, bench2_pgo, dero-v114, "gm_*", "go-miner*" -ErrorAction SilentlyContinue
+    if ($strays) { throw "stray bench process running: $($strays.ProcessName -join ', ')" }
+}
+Assert-NoStrays
 
 function Invoke-Leg([string]$exe, [string]$arm, [int]$index) {
     $log = Join-Path $outDir ("leg-{0:d2}-{1}.log" -f $index, $arm)
@@ -63,9 +76,16 @@ function Invoke-Leg([string]$exe, [string]$arm, [int]$index) {
     if ($LASTEXITCODE -ne 0) { throw "leg $index ($arm) exited $LASTEXITCODE — see $log" }
 
     # Checkpoint lines: `120+  t=2m30s interval=   18.50 KH/s total=...`.
-    # Steady state = the `120+` intervals, each covering 30s past the 120s mark.
-    $steadyRates = Select-String -Path $log -Pattern '^120\+\s+t=\S+\s+interval=\s*([0-9.]+) KH/s' |
-        ForEach-Object { [double]$_.Matches[0].Groups[1].Value }
+    # Steady state = intervals ENDING strictly after 120s. The t=120s line is
+    # ramp (its interval covers [90s, 120s]), so parse the t= duration and
+    # keep > 120s rather than trusting the `120+` label alone.
+    $steadyRates = Select-String -Path $log -Pattern '^120\+\s+t=(?:(\d+)m)?(\d+(?:\.\d+)?)s\s+interval=\s*([0-9.]+) KH/s' |
+        ForEach-Object {
+            $m = $_.Matches[0]
+            $endSecs = [double]$m.Groups[2].Value
+            if ($m.Groups[1].Success) { $endSecs += 60 * [int]$m.Groups[1].Value }
+            if ($endSecs -gt 120) { [double]$m.Groups[3].Value }
+        }
     if (-not $steadyRates) { throw "no steady-state checkpoints parsed from $log" }
     $steady = ($steadyRates | Measure-Object -Average).Average
 
@@ -84,6 +104,7 @@ for ($i = 0; $i -lt $order.Count; $i++) {
     $arm = $order[$i]
     $exe = if ($arm -eq "B") { $BaseExe } else { $CandExe }
     Write-Host ("leg {0}/8: {1}" -f ($i + 1), $arm)
+    Assert-NoStrays
     $rows += Invoke-Leg $exe $arm ($i + 1)
     if ($i -lt $order.Count - 1) { Start-Sleep $CooldownSecs }
 }

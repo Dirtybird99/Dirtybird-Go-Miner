@@ -9,9 +9,11 @@ freedom. Reports the percent effect exp(d)-1, its standard error, the two-sided
 (t crit 2.776 / 2.132 at df=4).
 
 Usage: python analyze-thue-morse.py path/to/legs.csv
+       python analyze-thue-morse.py --selftest
 """
 
 import csv
+import io
 import math
 import sys
 
@@ -45,16 +47,20 @@ def invert(a):
     return [[cols[j][i] for j in range(n)] for i in range(n)]
 
 
-def main(path):
+def analyze(f):
+    """Fit the model over an open legs.csv stream; return the key figures."""
     rows = []
-    with open(path, newline="") as f:
-        for row in csv.DictReader(f):
-            arm = row["arm"].strip().strip('"')
-            if arm in ("B", "C"):
-                rows.append((int(row["leg"]), arm, float(row["steadyKHs"])))
+    for row in csv.DictReader(f):
+        arm = row["arm"].strip().strip('"')
+        if arm in ("B", "C"):
+            rows.append((int(row["leg"]), arm, float(row["steadyKHs"])))
     rows.sort()
     if len(rows) != 8:
         raise SystemExit(f"expected 8 measured legs, found {len(rows)}")
+    if [leg for leg, _, _ in rows] != list(range(1, 9)):
+        raise SystemExit("leg positions must be exactly 1..8")
+    if sum(1 for _, arm, _ in rows if arm == "C") != 4:
+        raise SystemExit("expected 4 base and 4 candidate legs")
 
     xs = [[1.0, leg, leg * leg, 1.0 if arm == "C" else 0.0] for leg, arm, _ in rows]
     ys = [math.log(rate) for _, _, rate in rows]
@@ -69,25 +75,56 @@ def main(path):
     s2 = sum(e * e for e in resid) / df
     cov = invert(xtx)
     se_d = math.sqrt(s2 * cov[3][3])
-    d = beta[3]
+    return rows, beta, beta[3], se_d, df
+
+
+def main(path):
+    with open(path, newline="") as f:
+        rows, beta, d, se_d, df = analyze(f)
 
     pct = lambda v: 100.0 * (math.exp(v) - 1.0)
     two = T_TWO_SIDED_95[df]
     one = T_ONE_SIDED_95[df]
 
-    print(f"legs (position, arm, steady KH/s):")
+    print("legs (position, arm, steady KH/s):")
     for leg, arm, rate in rows:
         print(f"  {leg}  {arm}  {rate:.4f}")
     print(f"\ntreatment (candidate vs base), drift-adjusted, df={df}:")
     print(f"  point estimate : {pct(d):+.3f}%")
-    print(f"  standard error : {pct(se_d) - 0:.3f} pp (log-scale se {se_d:.5f})")
+    # delta method: the SE of exp(d)-1 in percent is 100*exp(d)*se
+    print(f"  standard error : {100.0 * math.exp(d) * se_d:.3f} pp (log-scale se {se_d:.5f})")
     print(f"  95% CI         : [{pct(d - two * se_d):+.3f}%, {pct(d + two * se_d):+.3f}%]")
     print(f"  one-sided 95% lower bound: {pct(d - one * se_d):+.3f}%")
     print(f"  linear drift   : {pct(beta[1]):+.3f}%/leg, quadratic: {pct(beta[2]):+.4f}%/leg^2")
     print("\nretention needs: point >= +2% AND one-sided lower bound > 0 at the primary target.")
 
 
+def selftest():
+    """Exact-fit recovery: synthesize legs from known coefficients and require
+    the fit to reproduce them to floating-point precision."""
+    b0, b1, b2, d_true = math.log(18.5), 0.004, -0.0003, 0.03
+    order = ["B", "C", "C", "B", "C", "B", "B", "C"]
+    lines = ["leg,arm,steadyKHs"]
+    for x, arm in enumerate(order, start=1):
+        y = b0 + b1 * x + b2 * x * x + (d_true if arm == "C" else 0.0)
+        lines.append(f"{x},{arm},{math.exp(y):.12f}")
+    _, beta, d, se_d, df = analyze(io.StringIO("\n".join(lines) + "\n"))
+    for name, got, want in [
+        ("treatment", d, d_true),
+        ("linear", beta[1], b1),
+        ("quadratic", beta[2], b2),
+    ]:
+        if abs(got - want) > 1e-9:
+            raise SystemExit(f"selftest FAILED: {name} = {got}, want {want}")
+    if se_d > 1e-9:
+        raise SystemExit(f"selftest FAILED: exact fit should have ~zero SE, got {se_d}")
+    print(f"selftest ok: recovered {100 * (math.exp(d) - 1):+.6f}% with df={df}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
-    main(sys.argv[1])
+    if sys.argv[1] == "--selftest":
+        selftest()
+    else:
+        main(sys.argv[1])

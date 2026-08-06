@@ -75,6 +75,11 @@ jobs:
       - name: Stage-stats accounting
         if: matrix.os == 'ubuntu-latest'
         run: go test -tags stagestats ./internal/astrobwt -run '^TestStageStats' -count=1
+      # The analyzer produces the number that decides candidate retention;
+      # its OLS is gated the same way bench-matrix's arithmetic is.
+      - name: Bench analyzer selftest
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/analyze-thue-morse.py --selftest
       - name: Race
         run: go test -race -count=1 -timeout=30m ./internal/...
       - name: Shell hygiene

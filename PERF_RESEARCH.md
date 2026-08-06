@@ -90,7 +90,8 @@ everywhere. The tag is kept so the kernel can be re-measured on AMD, where the
    18/hash trigger).
 3. ~~Revisit the stage-4 short-run cutoff near `stage4ShortRunMax = 25`.~~
    **CLOSED 2026-08-05: all four pre-registered variants (16/20/32/40) are
-   micro nulls** — best +0.13% [-0.53%, +0.80%], every CI excludes the +2%
+   micro nulls** — best +0.13% [-0.56%, +0.83%] (df=11 criticals; the
+   originally-quoted [-0.53%, +0.80%] used df=19), every CI excludes the +2%
    gate; the trigger fired (17-25-group runs are 1.81% of template runs) but
    the population's work share is too small to matter. Binary-distinctness
    positive control passed (all five arms hash differently). Keep 25.
@@ -249,7 +250,8 @@ decimals — positive control across different nonce streams):
   4 g 9.6%, 5-8 g 21.0%, 9-16 g 10.9%, **17-25 g 1.81%, 26+ g 0.29%**.
 - Equal-key merge groups per hash: literal 2-4: 197.4, literal 5-8: 20.4,
   literal 9-16: 10.8, literal 17-32: 13.4, two-run: 79.4, large fallback: 9.6.
-  Total ~331 collision groups/hash involving ~1,300 records — small against
+  Total ~331 collision groups/hash involving ~1,500-1,700 records (bucket
+  midpoints) — small against
   the ~45k records/hash estimate, so a fixup-style materializer pays its
   collision cost rarely.
 - v114 fallback hashes: 0 in both legs.
@@ -260,7 +262,8 @@ pre-registered >=18/hash trigger. No threshold candidate.
 
 **Backlog 3 TRIGGERED:** runs of 17-25 groups are 1.81% of template runs,
 above the pre-registered 1% trigger (26+ adds 0.29%). A `stage4ShortRunMax`
-variant A/B (16/20/32/40) is owed; expectation stays modest — the column-255
+variant A/B (16/20/32/40) was owed (since run and CLOSED — all four null;
+see the backlog list); expectation stayed modest — the column-255
 sort is a small fraction of a run's emit work.
 
 ### Measurement instrument calibrated (A/A with a layout-null arm)
@@ -272,20 +275,38 @@ pre-built test binary pinned by process affinity 0x1 at High priority:
   error on the mean effect — the historical CoV was unpaired pooling plus
   rebuild/migration noise, not hashing noise.
 - The semantically-null layout change measures **+0.28% [-0.03%, +0.58%]**:
-  the layout-noise floor on this box/toolchain. Micro effects below ~0.6%
+  the attribution floor on this box/toolchain. Micro effects below ~0.6%
   cannot be attributed to code semantics; the +2% gate keeps 3-6x margin.
+  CAVEAT (review): the campaign's couples ran base-then-cand every couple,
+  which perfectly aliases a constant position effect (cold-core turbo,
+  first-touch) with the arm effect — so the +0.28% may be layout, position,
+  or both; historical runs cannot distinguish. The script now alternates arm
+  order per couple, making the position component average out. Treat the
+  floor as an attribution limit, not necessarily a layout property.
 
 Sustained A/A (8-leg Thue-Morse, 240 s legs, 20T, steady-state window):
 null effect **+0.275% ± 0.26 pp, 95% CI [-0.45%, +1.00%]**, one-sided lower
 bound -0.28% — the instrument resolves the +2% gate with wide margin and
-correctly rejects a null. The +0.275% point estimate reproduces the micro's
-layout floor on an independent instrument; linear thermal drift -0.37%/leg
-confirmed, quadratic negligible. Run: `bench-results/thue-morse/`
+correctly rejects a null. The +0.275% point estimate is consistent with the
+micro's floor (both CIs also cover zero — read as compatibility, not
+replication). Drift is session-specific, not a box property: this session
+fitted -0.37%/leg linear, while the candidate session two hours later fitted
++0.365%/leg — opposite sign, which is exactly why the design balances drift
+rather than assuming its shape. Run: `bench-results/thue-morse/`
 20260805-161156-aa-20t. See `scripts/bench-thue-morse.ps1` +
 `scripts/analyze-thue-morse.py` for the design (quadratic-drift-balanced
-order, steady-state [120 s, leg-end] window, drift-adjusted fit with 4
-residual df) and `scripts/bench-micro-couples.ps1` for the paired micro
-screen. Retention rule for this campaign: point >= +2%
+order, steady-state window, drift-adjusted fit with 4 residual df) and
+`scripts/bench-micro-couples.ps1` for the paired micro screen.
+WINDOW ERRATUM (review): the recorded runs' steady-state window was
+[90 s, leg-end], not the documented [120 s, leg-end] — the t=120 s
+checkpoint's interval covers [90 s, 120 s] ramp and was included. Refits on
+the strict window change no verdict (A/A +0.275% → +0.270%; the candidate
+-1.171% → -1.087%, CI still excluding zero). The script now parses checkpoint
+end times and excludes it.
+TSC anchor (review, measured directly): this box's invariant TSC is
+2.3040 GHz (38.4 MHz crystal x 60), so the implied-TSC agreement below is an
+ABSOLUTE bound — unbracketed wall time is 0.009-0.041%, not merely equal
+across regimes. Retention rule for this campaign: point >= +2%
 at 20T sustained AND one-sided 95% lower bound > 0 there AND no demonstrated
 regression beyond -0.5% at the secondary target.
 
@@ -302,15 +323,27 @@ against the same base binary:
 | B: flat-loop materializer, radix intact | group scan incl. all merges | **+12.61% [+12.05%, +13.17%]** |
 | A: flat loop AND no pass 3/swap | scan + pass-3 record scatter | **+17.15% [+16.71%, +17.59%]** |
 
-Attribution: scan side ~12.6%, pass-3 side ~4.5%, additive to within noise.
-Both tripwires cleared (below the +20% "measurement is wrong" bound — the
-theoretical ceiling was ~+19.6% — and far above the +1% "stage is
-memmove-bound" kill signal). A real fused-scatter must keep the equal-key
-merges (~8% of hash by the old profile's cumulative arithmetic) and pay
-bucket-cursor bookkeeping (~2-3%), so the realistic candidate expectation is
-**~+6-7% at 1T micro**, with the memory-traffic mechanism arguing for at
-least as much at 20T. Probes were working-tree-only and are fully reverted;
-this table is their record.
+Attribution in ONE unit space — work share removed, converted from the
+speedups (share = 1 − 1/(1+s)): probe B removed **11.19%** of hash work,
+probe A **14.64%**, so the pass-3 increment is **3.45%** by definition
+(A − B is the increment, not an independence test — additivity was never
+probed separately). The pre-registered tripwires were speedup-space numbers:
+below the +20% "measurement is wrong" bound (the reconstructed work-share
+ceiling, 14.9% flat + 14.0%/3 ≈ 19.6%, corresponds to a +24.3% speedup, so
+the tripwire was in fact looser than it read) and far above the +1% kill
+signal.
+
+**Post-hoc correction (found in review):** the go/no-go arithmetic below
+originally mixed speedup-space and work-share numbers, and used a "~8% of
+hash" merge-cost prior from the old profile's cumulative arithmetic. That
+prior is SUPERSEDED by this campaign's own measurement — the candidate's 1T
+null against probe B implies the merges are ~11.2% of hash work, nearly the
+whole scan-side removal. Computed consistently even on the optimistic 8%
+prior, the candidate expectation was **~+0.5% to +1.5% at 1T** — borderline
+against the +2% gate BEFORE implementation, not the "~+6-7%" recorded at the
+time. The decision to implement was made on the inconsistent arithmetic; the
+measured rejection below stands on its own regardless. Probes were
+working-tree-only and are fully reverted; this table is their record.
 
 ### Fused-scatter materializer ("scatter positions, not records") — measured, REJECTED, backlog 7 closed
 
@@ -327,8 +360,8 @@ Measured against its parent commit (`GOAMD64=v3`, `default.pgo`):
 | instrument | effect |
 |---|---:|
 | 1T micro, 20 couples, P-core | **-0.01% [-0.55%, +0.53%]** (null) |
-| 1T micro, 12 couples, E-core | +0.13% [-0.17%, +0.43%] (null) |
-| 1T micro, 12 couples, P-core, `-pgo=off` both arms | +0.37% [-0.50%, +1.25%] (null; stale-PGO bias ~0.4 pp, not load-bearing) |
+| 1T micro, 12 couples, E-core | +0.13% [-0.18%, +0.44%] (null; df=11 criticals) |
+| 1T micro, 12 couples, P-core, `-pgo=off` both arms | +0.37% [-0.55%, +1.29%] (null, df=11; the +0.38 pp shift vs the PGO pair has SE ~0.49 pp — not distinguishable from zero, and either way not load-bearing) |
 | **20T sustained, 8-leg Thue-Morse, steady-state** | **-1.17% [-1.94%, -0.39%] — significant regression** |
 
 **The attribution finding (why the +17% ceiling did not survive):** the
@@ -357,7 +390,8 @@ Consequences, all closed:
 
 - **Underpowered-gate hypothesis for older ledger rows:** every pre-2026-08-05
   sustained verdict was produced by a 4-leg ABBA design whose null
-  distribution (measured by this campaign's A/A) spans roughly ±1 pp and
+  distribution (inferred — the campaign's A/A used the 8-leg design, whose
+  measured SE bounds the ABBA design from below) spans roughly ±1 pp and
   whose CI on the repo's one KEPT candidate spanned zero. Some past
   "confident" dead ends may have been real sub-2% effects in either
   direction. Under the standing strict +2% gate this changes no decision,
