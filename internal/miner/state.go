@@ -27,6 +27,7 @@ type State struct {
 	jobid  string
 	target [32]byte
 	epoch  atomic.Uint64 // bumped on every job change; 0 = no job yet
+	active atomic.Bool
 
 	Height atomic.Uint64
 	Diff   atomic.Uint64
@@ -62,13 +63,14 @@ func (s *State) SetJob(j getwork.Job) (changed bool, err error) {
 	target := ComputeTarget(j.Difficultyuint64)
 
 	s.mu.Lock()
-	changed = blob != s.blob || j.JobID != s.jobid || target != s.target
+	changed = !s.active.Load() || blob != s.blob || j.JobID != s.jobid || target != s.target
 	if changed {
 		s.blob = blob
 		s.jobid = j.JobID
 		s.target = target
 		s.epoch.Add(1)
 	}
+	s.active.Store(true)
 	s.mu.Unlock()
 
 	s.Height.Store(j.Height)
@@ -88,3 +90,16 @@ func (s *State) Job() (blob [MiniblockSize]byte, jobid string, target [32]byte, 
 
 // Epoch is the cheap per-hash staleness check.
 func (s *State) Epoch() uint64 { return s.epoch.Load() }
+
+// Active reports whether workers may mine the current snapshot.
+func (s *State) Active() bool { return s.active.Load() }
+
+// Invalidate stops workers without resetting the monotonic epoch. A later
+// valid SetJob reactivates even when the server sends the same work again.
+func (s *State) Invalidate() {
+	s.mu.Lock()
+	if s.active.Swap(false) {
+		s.epoch.Add(1)
+	}
+	s.mu.Unlock()
+}

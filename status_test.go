@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"go-miner/internal/console"
+	"go-miner/internal/getwork"
+	"go-miner/internal/miner"
 )
 
 // phoneFields reproduces the reference miner's Termux screenshot: the case
@@ -144,8 +146,8 @@ func TestRenderFullMatchesLegacy(t *testing.T) {
 			f.Rate, f.Avg, f.Height, f.MiniBlocks, f.Blocks,
 			f.Rejected, f.Diff, up/3600, up/60%60, up%60)
 		if f.Verbose {
-			line += fmt.Sprintf(" | funnel submitted:%d acc:%d rej:%d stale:%d sendfail:%d",
-				f.Submitted, f.MiniBlocks, f.Rejected, f.Stale, f.SendFails)
+			line += fmt.Sprintf(" | funnel submitted:%d acc:%d rej:%d stale:%d discarded:%d sendfail:%d",
+				f.Submitted, f.MiniBlocks, f.Rejected, f.Stale, f.Discarded, f.SendFails)
 		}
 		return line
 	}
@@ -154,12 +156,20 @@ func TestRenderFullMatchesLegacy(t *testing.T) {
 		{Rate: 11.31, Avg: 11.02, Height: 3141592, MiniBlocks: 962, Blocks: 93, Diff: "795K", Up: 71},
 		{Rate: 0, Avg: 4.96, Height: 7368356, MiniBlocks: 962, Blocks: 93, Rejected: 25, Diff: "795K", Up: 71},
 		{Rate: 1.5, Avg: 1.25, Height: 42, Rejected: 1, Diff: "0", Up: 3601,
-			Verbose: true, Submitted: 10, Stale: 2, SendFails: 1},
+			Verbose: true, Submitted: 10, Stale: 2, Discarded: 3, SendFails: 1},
 	}
 	for i, f := range cases {
 		if got, want := renderTier(tierFull, console.Colour(), f).String(), legacy(f); got != want {
 			t.Fatalf("case %d:\ngot  %q\nwant %q", i, got, want)
 		}
+	}
+}
+
+func TestSnapshotStatusIncludesDiscardedSubmits(t *testing.T) {
+	client := &getwork.Client{}
+	client.Discarded.Store(7)
+	if got := snapshotStatus(&miner.State{}, client, 0, 0, 0, true).Discarded; got != 7 {
+		t.Fatalf("Discarded = %d, want 7", got)
 	}
 }
 

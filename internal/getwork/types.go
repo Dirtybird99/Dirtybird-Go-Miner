@@ -20,4 +20,5 @@ type Job struct {
 type Submit struct {
 	JobID string `json:"jobid"`
 	Blob  string `json:"mbl_blob"`
+	Epoch uint64 `json:"-"`
 }

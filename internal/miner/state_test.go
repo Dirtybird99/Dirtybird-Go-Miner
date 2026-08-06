@@ -23,8 +23,8 @@ func TestSetJobBumpsEpochOnChangeOnly(t *testing.T) {
 	st := &State{}
 	j := validJob()
 	changed, err := st.SetJob(j)
-	if err != nil || !changed || st.Epoch() != 1 {
-		t.Fatalf("first job: changed=%v err=%v epoch=%d", changed, err, st.Epoch())
+	if err != nil || !changed || st.Epoch() != 1 || !st.Active() {
+		t.Fatalf("first job: changed=%v err=%v epoch=%d active=%v", changed, err, st.Epoch(), st.Active())
 	}
 	j.MiniBlocks = 4
 	j.Blocks = 1
@@ -54,6 +54,28 @@ func TestSetJobBumpsEpochOnChangeOnly(t *testing.T) {
 	}
 	if st.MiniBlocks.Load() != 4 || st.Height.Load() != 100 || st.Diff.Load() != 30000 {
 		t.Fatal("counters not mirrored")
+	}
+}
+
+func TestInvalidateStopsAndReactivatesIdenticalJob(t *testing.T) {
+	st := &State{}
+	if st.Active() {
+		t.Fatal("zero State is active")
+	}
+	j := validJob()
+	if changed, err := st.SetJob(j); err != nil || !changed {
+		t.Fatalf("seed job: changed=%v err=%v", changed, err)
+	}
+	st.Invalidate()
+	if st.Active() || st.Epoch() != 2 {
+		t.Fatalf("invalidated state: active=%v epoch=%d, want false/2", st.Active(), st.Epoch())
+	}
+	st.Invalidate()
+	if st.Epoch() != 2 {
+		t.Fatalf("repeated invalidation bumped epoch to %d", st.Epoch())
+	}
+	if changed, err := st.SetJob(j); err != nil || !changed || !st.Active() || st.Epoch() != 3 {
+		t.Fatalf("reactivation: changed=%v err=%v active=%v epoch=%d", changed, err, st.Active(), st.Epoch())
 	}
 }
 
@@ -92,8 +114,8 @@ func TestSetJobRejectsBadInput(t *testing.T) {
 		t.Fatal("want ErrBadJobID for empty jobid")
 	}
 
-	if st.Epoch() != 0 {
-		t.Fatal("rejected jobs must not bump the epoch")
+	if st.Epoch() != 0 || st.Active() {
+		t.Fatal("rejected jobs must not publish active work")
 	}
 }
 

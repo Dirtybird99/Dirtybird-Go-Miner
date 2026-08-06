@@ -9,9 +9,9 @@ import (
 
 const katHash = "54e2324ddacc3f0383501a9e5760f85d63e9bc6705e9124ca7aef89016ab81ea"
 
-// kat verifies AstroBWTv3("a") — the family's unconditional startup gate.
-func kat() error {
-	got := fmt.Sprintf("%x", astrobwt.Sum([]byte("a")))
+// kat verifies AstroBWTv3("a") through the backend the miner will use.
+func kat(backend astrobwt.Backend) error {
+	got := fmt.Sprintf("%x", astrobwt.NewWithBackend(backend).Hash([]byte("a")))
 	if got != katHash {
 		return fmt.Errorf("KAT failed: pow(\"a\") = %s, want %s — refusing to mine with a broken hash", got, katHash)
 	}
@@ -32,21 +32,30 @@ var selftestVectors = []struct{ in, out string }{
 }
 
 func runSelftest() int {
-	h := astrobwt.New()
-	for _, v := range selftestVectors {
-		got := fmt.Sprintf("%x", h.Hash([]byte(v.in)))
-		if got != v.out {
-			fmt.Printf("FAIL pow(%q) = %s want %s\n", v.in, got, v.out)
+	backends := []struct {
+		name    string
+		backend astrobwt.Backend
+	}{
+		{"sais", astrobwt.BackendSAIS},
+		{"v114", astrobwt.BackendV114},
+	}
+	for _, b := range backends {
+		h := astrobwt.NewWithBackend(b.backend)
+		for _, v := range selftestVectors {
+			got := fmt.Sprintf("%x", h.Hash([]byte(v.in)))
+			if got != v.out {
+				fmt.Printf("FAIL %s pow(%q) = %s want %s\n", b.name, v.in, got, v.out)
+				return 1
+			}
+		}
+		// 48-byte miniblock vector (the real input shape)
+		data, _ := hex.DecodeString("419ebb000000001bbdc9bf2200000000635d6e4e24829b4249fe0e67878ad4350000000043f53e5436cf610000086b00")
+		got := fmt.Sprintf("%x", h.Hash(data))
+		if got != "c392762a462fd991ace791bfe858c338c10c23c555796b50f665b636cb8c8440" {
+			fmt.Printf("FAIL %s 48-byte vector = %s\n", b.name, got)
 			return 1
 		}
 	}
-	// 48-byte miniblock vector (the real input shape)
-	data, _ := hex.DecodeString("419ebb000000001bbdc9bf2200000000635d6e4e24829b4249fe0e67878ad4350000000043f53e5436cf610000086b00")
-	got := fmt.Sprintf("%x", h.Hash(data))
-	if got != "c392762a462fd991ace791bfe858c338c10c23c555796b50f665b636cb8c8440" {
-		fmt.Printf("FAIL 48-byte vector = %s\n", got)
-		return 1
-	}
-	fmt.Printf("selftest pow(a): %s PASS (%d vectors)\n", katHash, len(selftestVectors)+1)
+	fmt.Printf("selftest pow(a): %s PASS (%d vectors x %d backends)\n", katHash, len(selftestVectors)+1, len(backends))
 	return 0
 }
