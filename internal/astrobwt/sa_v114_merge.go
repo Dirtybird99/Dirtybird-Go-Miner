@@ -214,6 +214,9 @@ func tryWriteTwoRuns(view *stage4View, arena []uint32, runs []stage5Run, sa []in
 		rightRel++
 		outPos++
 	}
+	if V114StatsEnabled {
+		v114StatsRecordTwoRunCompares(cmps)
+	}
 	return outPos, true
 }
 
