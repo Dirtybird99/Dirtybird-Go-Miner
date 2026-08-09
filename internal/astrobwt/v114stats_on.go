@@ -37,16 +37,20 @@ var (
 	v114LiteralMergeGroups  [v114LiteralBucketCount]atomic.Uint64
 	v114TwoRunMerges        atomic.Uint64
 	v114LargeFallbackMerges atomic.Uint64
+	v114GenericKeyColumns   atomic.Uint64
+	v114EqualKeyColumns     atomic.Uint64
+	v114GenericPredColumns  atomic.Uint64
+	v114EqualPredColumns    atomic.Uint64
 
 	// comparator campaign counters: suffix compares per merge path, compare
 	// totals per literal bucket, and the RDTSC bracket over the whole
 	// multi-record merge arm
-	v114LiteralCompares        atomic.Uint64
-	v114TwoRunCompares         atomic.Uint64
-	v114KWayCompares           atomic.Uint64
-	v114LiteralBucketCompares  [v114LiteralBucketCount]atomic.Uint64
-	v114MergeCycles            atomic.Uint64
-	v114MergeBrackets          atomic.Uint64
+	v114LiteralCompares       atomic.Uint64
+	v114TwoRunCompares        atomic.Uint64
+	v114KWayCompares          atomic.Uint64
+	v114LiteralBucketCompares [v114LiteralBucketCount]atomic.Uint64
+	v114MergeCycles           atomic.Uint64
+	v114MergeBrackets         atomic.Uint64
 
 	// low-entropy discriminator for large groups, indexed 0 = literal
 	// count>=17, 1 = k-way fallback
@@ -222,6 +226,20 @@ func v114StatsRecordLargeFallbackMerge() {
 	v114LargeFallbackMerges.Add(1)
 }
 
+func v114StatsRecordGenericKeyColumn(equal bool) {
+	v114GenericKeyColumns.Add(1)
+	if equal {
+		v114EqualKeyColumns.Add(1)
+	}
+}
+
+func v114StatsRecordGenericPredecessorColumn(equal bool) {
+	v114GenericPredColumns.Add(1)
+	if equal {
+		v114EqualPredColumns.Add(1)
+	}
+}
+
 // PrintV114Stats prints cumulative descriptor counters for benchmark runs.
 func PrintV114Stats(w io.Writer) {
 	groupLabels := [...]string{"1", "2", "3", "4", "5-8", "9-16", "17-25", "26+"}
@@ -239,6 +257,14 @@ func PrintV114Stats(w io.Writer) {
 	fmt.Fprintf(w, "    two-run merge: %d\n", v114TwoRunMerges.Load())
 	fmt.Fprintf(w, "    large fallback merge: %d\n", v114LargeFallbackMerges.Load())
 	fmt.Fprintf(w, "    v114 fallback hashes: %d\n", V114Fallbacks())
+	if columns := v114GenericKeyColumns.Load(); columns > 0 {
+		fmt.Fprintf(w, "    equal generic key columns: %d/%d (%.2f%%)\n",
+			v114EqualKeyColumns.Load(), columns, 100*float64(v114EqualKeyColumns.Load())/float64(columns))
+	}
+	if columns := v114GenericPredColumns.Load(); columns > 0 {
+		fmt.Fprintf(w, "    equal generic predecessor columns: %d/%d (%.2f%%)\n",
+			v114EqualPredColumns.Load(), columns, 100*float64(v114EqualPredColumns.Load())/float64(columns))
+	}
 
 	fmt.Fprintln(w, "  comparator:")
 	fmt.Fprintf(w, "    compares literal=%d two-run=%d k-way=%d\n",

@@ -531,6 +531,79 @@ legs, cooldown before the block per the lesson above):
   re-measurement on an idle box would tighten it; retention does not
   depend on it.
 
+## 2026-08-09 AstroX equality-parity campaign
+
+Starting point: clean `main` at
+`ffeacc964a94452d1e42db093bc677580605c412`, Go 1.26.5,
+`GOAMD64=v3`, committed `default.pgo`, Intel i7-13700HX. The candidate set
+came from the four changes in Dirtybird-C-Miner commit `8e94918`: uniform
+columns, cached two-run prefixes, already-sorted run reuse, and four-unique
+materialization. Go already had sorted-run reuse and bottom-up merging, so
+that item needed no port.
+
+Instrumentation over a 1-thread production hash stream found generic columns
+were overwhelmingly uniform: 73,691,023/80,177,408 3-byte key columns
+(**91.91%**) and 74,945,801/79,864,215 predecessor columns (**93.84%**).
+The retained Go-native path therefore checks the suffix-sorted endpoint keys,
+emits one existing arena run when they match, and preserves the current order
+when every predecessor byte matches. It adds no dependency, assembly, or
+untagged instrumentation cost. A constant-column SA test covers 3, 8, and 26
+groups against SAIS.
+
+Pinned P-core micro screens used 20 alternating couples at 600 hashes/arm.
+Each row compares only against its direct parent:
+
+| Candidate | Effect and 95% CI | Decision |
+|---|---:|---|
+| In-loop uniform-column shortcut | **+3.608% [+2.637%, +4.589%]**, one-sided lower +2.805% | Retained |
+| Cached active two-run prefixes | -0.177% [-0.708%, +0.358%] | Reverted |
+| Four adjacent unique records | **-2.230% [-2.806%, -1.652%]** | Reverted |
+| Precomputed portable 64-bit equality mask | +0.479% [-0.334%, +1.299%] | Reverted below the 0.6% attribution floor |
+| Fresh 60-second 20T x1 PGO profile | +1.221% [-1.784%, +4.319%] | Rejected; `default.pgo` retained |
+
+The binding 20-thread x1 test was an uninterrupted 8-leg, 240-second
+Thue-Morse block after a discarded warm-up, with 20-second cooldowns. Base
+steady legs were 18.5900, 18.6675, 18.7800, and 18.7825 KH/s (median
+18.7238); candidate legs were 19.2750, 19.5850, 19.6325, and 19.7750 KH/s
+(median 19.6088, **+4.727%**). The drift-adjusted treatment was
+**+4.604%**, SE 0.584 pp, 95% CI **[+2.995%, +6.238%]**, one-sided lower
+**+3.366%**. This clears both the attribution floor and the prior +2%
+primary-target rule.
+
+Frozen executable SHA-256 provenance: base
+`C2341E5FC0ECC953B101F5976D6FD51460BEA7B51A699FA28333698D23CC6267`,
+candidate `5B846791B7FEB108386B5E1C5079CBDBDF6199FDD2AF5BE59388B950D8942205`.
+Raw local evidence is under ignored `bench-results/micro-couples/20260809-*`
+and `bench-results/thue-morse/20260809-143549-equality-final`.
+
+### Cross-miner diagnostic after retention
+
+Two balanced `Go-Rust-Zig-Zig-Rust-Go` blocks used 30-second legs,
+20-second cooldowns, explicit pinned/HIGH scheduling, and checked each
+miner's reported x1/x2 mode. These short blocks locate the remaining gap;
+they are not promoted as official sustained rankings.
+
+| Pipeline / threads | Go median | Rust median | Zig median |
+|---|---:|---:|---:|
+| x1 / 1T | 1.735 KH/s | 2.125 KH/s | 2.340 KH/s |
+| x1 / 20T | 20.290 KH/s | 24.475 KH/s | 25.525 KH/s |
+| x2 / 1T | 1.850 KH/s | 2.215 KH/s | 2.465 KH/s |
+| x2 / 20T | 20.885 KH/s | 25.590 KH/s | 26.385 KH/s |
+
+x2 was the best measured mode for all three. Go remains about **18.4%**
+behind Rust and **20.8%** behind Zig at 20T, so the retained improvement is
+real but does not establish parity. The harness initially failed closed
+because current Rust reports `pipeline=1way|2way`; it now normalizes those
+spellings to x1/x2, with one-second smoke blocks proving both modes.
+
+The exact Dirtybird-C-Miner `8e94918` PGO artifact was also run through its
+own deterministic trainer at 20 threads: 20-second warm-up, 120.082 measured
+seconds, 3,296,452 hashes, **27.452 KH/s**. This confirms the C all-time-high
+direction on this host and exceeds the commit message's 27.119 KH/s median,
+but it is not placed in the matched table because the C trainer is a different
+harness. Raw cross-miner evidence is under ignored
+`bench-results/head-to-head-{x1,x2}-final`.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest

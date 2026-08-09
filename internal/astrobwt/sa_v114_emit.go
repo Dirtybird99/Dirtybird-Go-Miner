@@ -176,23 +176,52 @@ func emitFullGroupRunGeneric(view *stage4View, startGroup, groupCount uint32, v 
 	}
 
 	for rel := 255; rel >= 0; rel-- {
-		groupStart := 0
-		for groupStart < gc {
-			key := keys[groupStart]
-			groupEnd := groupStart + 1
-			for groupEnd < gc && keys[groupEnd] == key {
-				groupEnd++
-			}
-			if groupEnd == groupStart+1 {
-				// singleton fast path (most groups); avoids the call
-				v.runs = append(v.runs, stage5Run{key: key, packed: order[groupStart]})
-			} else if !appendOrderGroup(v, key, order, uint32(groupStart), uint32(groupEnd-groupStart)) {
+		equalKey := keys[0] == keys[gc-1]
+		v114StatsRecordGenericKeyColumn(equalKey)
+		if equalKey {
+			// order is suffix-sorted, so equal endpoint prefixes prove the
+			// entire column has one contiguous key group.
+			if !appendOrderGroup(v, keys[0], order, 0, groupCount) {
 				return false
 			}
-			groupStart = groupEnd
+		} else {
+			groupStart := 0
+			for groupStart < gc {
+				key := keys[groupStart]
+				groupEnd := groupStart + 1
+				for groupEnd < gc && keys[groupEnd] == key {
+					groupEnd++
+				}
+				if groupEnd == groupStart+1 {
+					// singleton fast path (most groups); avoids the call
+					v.runs = append(v.runs, stage5Run{key: key, packed: order[groupStart]})
+				} else if !appendOrderGroup(v, key, order, uint32(groupStart), uint32(groupEnd-groupStart)) {
+					return false
+				}
+				groupStart = groupEnd
+			}
 		}
 
 		if rel > 0 {
+			// If every predecessor byte matches, stable induction preserves
+			// the existing suffix order and no insertion re-sort is needed.
+			b0 := uint32(*(*byte)(unsafe.Add(dp, order[0]-1)))
+			equalPredecessor := true
+			for i := 1; i < gc; i++ {
+				if uint32(*(*byte)(unsafe.Add(dp, order[i]-1))) != b0 {
+					equalPredecessor = false
+					break
+				}
+			}
+			v114StatsRecordGenericPredecessorColumn(equalPredecessor)
+			if equalPredecessor {
+				for i := 0; i < gc; i++ {
+					order[i]--
+					keys[i] = b0 | keys[i]<<8&0xffff00
+				}
+				continue
+			}
+
 			// decrement + key derivation fused into the stable first-byte
 			// insertion re-sort (the induction step): entries [0,i) are
 			// already decremented, re-keyed, and sorted when i is placed.
