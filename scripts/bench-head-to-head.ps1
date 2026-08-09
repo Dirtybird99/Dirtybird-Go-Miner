@@ -99,7 +99,7 @@ function Get-ObservedPipeline {
     param([string]$Miner, [string]$Output)
     $pattern = switch ($Miner) {
         "Go" { '(?m)^go-miner .* sustained bench:.*pipeline=(?<pipeline>x[12])$' }
-        "Rust" { '(?m)^sustained: .*pipeline=(?<pipeline>x[12]),' }
+        "Rust" { '(?m)^sustained: .*pipeline=(?<pipeline>x[12]|[12]way),' }
         "Zig" { '(?m)^(?<pipeline>bench2|bench):' }
     }
     $match = [regex]::Match($Output, $pattern)
@@ -107,7 +107,11 @@ function Get-ObservedPipeline {
     if ($Miner -eq "Zig") {
         return $(if ($match.Groups["pipeline"].Value -eq "bench2") { "x2" } else { "x1" })
     }
-    $match.Groups["pipeline"].Value
+    $pipeline = $match.Groups["pipeline"].Value
+    if ($Miner -eq "Rust" -and $pipeline -match '^([12])way$') {
+        return "x$($Matches[1])"
+    }
+    $pipeline
 }
 
 if ($DurationSecs -le 0) { throw "-DurationSecs must be greater than zero" }
