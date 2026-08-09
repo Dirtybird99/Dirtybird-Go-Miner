@@ -65,22 +65,24 @@ func siftDownSuffix(v *stage4View, order []uint32, root, n int) {
 	}
 }
 
-// appendOrderGroup is append_fused_order_group with count1_singletons=false
-// (the C++ default): singletons become literal runs, multi-position groups
-// spill their positions to the arena.
-func appendOrderGroup(v *v114Scratch, key uint32, order []uint32, first, count uint32) bool {
+// appendOriginGroup materializes one suffix position per group origin at rel.
+// Singletons stay literal; multi-position groups spill to the arena.
+func appendOriginGroup(v *v114Scratch, key uint32, origins []uint32, first, count, rel uint32) bool {
 	if count == 0 {
 		return false
 	}
 	if count == 1 {
-		v.runs = append(v.runs, stage5Run{key: key, packed: order[first]})
+		v.runs = append(v.runs, stage5Run{key: key, packed: origins[first] + rel})
 		return true
 	}
 	begin := uint32(len(v.arena))
 	if begin > arenaIndexCount || count > arenaIndexCount-begin {
 		return false
 	}
-	v.arena = append(v.arena, order[first:first+count]...)
+	v.arena = v.arena[:begin+count]
+	for i := uint32(0); i < count; i++ {
+		v.arena[begin+i] = origins[first+i] + rel
+	}
 	v.runs = append(v.runs, stage5Run{key: key, packed: count<<17 + begin})
 	return true
 }
@@ -158,44 +160,63 @@ func emitFullGroupRunGeneric(view *stage4View, startGroup, groupCount uint32, v 
 	} else {
 		heapSortSuffixOrder(view, order)
 	}
+	for i := range order {
+		order[i] -= 255
+	}
 
 	// All positions in order stay < logicalLen <= len(data)-4 throughout, so
 	// the hot per-column loops read data through unchecked pointers (the
 	// bounds checks here were ~15% of the SA stage).
 	dp := unsafe.Pointer(&view.data[0])
-
-	// keys[i] is kept equal to the 24-bit key at order[i] across columns: the
-	// induction step derives the next key from the current one plus ONE new
-	// byte (little-endian: key(pos-1) = data[pos-1] | key(pos)<<8 truncated),
-	// so only column 255 pays full key loads, and the re-sort compares
-	// in-array first bytes instead of random data reads.
-	var keysArr [stage4MaxGroupRun]uint32
-	keys := keysArr[:gc]
-	for i := range keys {
-		keys[i] = *(*uint32)(unsafe.Add(dp, order[i])) & 0xffffff
+	var equalColumns [4]uint64
+	for i := range equalColumns {
+		equalColumns[i] = ^uint64(0)
+	}
+	for chunk := 1; chunk < gc; chunk++ {
+		chunkBase := base + uint32(chunk)<<8
+		for word := uint32(0); word < 32; word++ {
+			offset := word << 3
+			diff := *(*uint64)(unsafe.Add(dp, base+offset)) ^
+				*(*uint64)(unsafe.Add(dp, chunkBase+offset))
+			if diff == 0 {
+				continue
+			}
+			for b := uint32(0); b < 8; b++ {
+				if byte(diff>>(b<<3)) != 0 {
+					rel := offset + b
+					equalColumns[rel>>6] &^= uint64(1) << (rel & 63)
+				}
+			}
+		}
+	}
+	columnEqual := func(rel int) bool {
+		return equalColumns[rel>>6]&(uint64(1)<<uint(rel&63)) != 0
 	}
 
 	for rel := 255; rel >= 0; rel-- {
-		equalKey := keys[0] == keys[gc-1]
+		relu := uint32(rel)
+		firstKey := *(*uint32)(unsafe.Add(dp, order[0]+relu)) & 0xffffff
+		equalKey := rel <= 253 && columnEqual(rel) && columnEqual(rel+1) && columnEqual(rel+2)
+		if rel > 253 {
+			equalKey = firstKey == *(*uint32)(unsafe.Add(dp, order[gc-1]+relu))&0xffffff
+		}
 		v114StatsRecordGenericKeyColumn(equalKey)
 		if equalKey {
-			// order is suffix-sorted, so equal endpoint prefixes prove the
-			// entire column has one contiguous key group.
-			if !appendOrderGroup(v, keys[0], order, 0, groupCount) {
+			if !appendOriginGroup(v, firstKey, order, 0, groupCount, relu) {
 				return false
 			}
 		} else {
 			groupStart := 0
 			for groupStart < gc {
-				key := keys[groupStart]
+				key := *(*uint32)(unsafe.Add(dp, order[groupStart]+relu)) & 0xffffff
 				groupEnd := groupStart + 1
-				for groupEnd < gc && keys[groupEnd] == key {
+				for groupEnd < gc && *(*uint32)(unsafe.Add(dp, order[groupEnd]+relu))&0xffffff == key {
 					groupEnd++
 				}
 				if groupEnd == groupStart+1 {
 					// singleton fast path (most groups); avoids the call
-					v.runs = append(v.runs, stage5Run{key: key, packed: order[groupStart]})
-				} else if !appendOrderGroup(v, key, order, uint32(groupStart), uint32(groupEnd-groupStart)) {
+					v.runs = append(v.runs, stage5Run{key: key, packed: order[groupStart] + relu})
+				} else if !appendOriginGroup(v, key, order, uint32(groupStart), uint32(groupEnd-groupStart), relu) {
 					return false
 				}
 				groupStart = groupEnd
@@ -203,43 +224,23 @@ func emitFullGroupRunGeneric(view *stage4View, startGroup, groupCount uint32, v 
 		}
 
 		if rel > 0 {
-			// If every predecessor byte matches, stable induction preserves
-			// the existing suffix order and no insertion re-sort is needed.
-			b0 := uint32(*(*byte)(unsafe.Add(dp, order[0]-1)))
-			equalPredecessor := true
-			for i := 1; i < gc; i++ {
-				if uint32(*(*byte)(unsafe.Add(dp, order[i]-1))) != b0 {
-					equalPredecessor = false
-					break
-				}
-			}
+			nextRel := uint32(rel - 1)
+			equalPredecessor := columnEqual(rel - 1)
 			v114StatsRecordGenericPredecessorColumn(equalPredecessor)
 			if equalPredecessor {
-				for i := 0; i < gc; i++ {
-					order[i]--
-					keys[i] = b0 | keys[i]<<8&0xffff00
-				}
 				continue
 			}
 
-			// decrement + key derivation fused into the stable first-byte
-			// insertion re-sort (the induction step): entries [0,i) are
-			// already decremented, re-keyed, and sorted when i is placed.
-			pos0 := order[0] - 1
-			order[0] = pos0
-			keys[0] = uint32(*(*byte)(unsafe.Add(dp, pos0))) | keys[0]<<8&0xffff00
+			// Stable first-byte induction over fixed group origins.
 			for i := 1; i < gc; i++ {
-				pos := order[i] - 1
-				b := uint32(*(*byte)(unsafe.Add(dp, pos)))
-				nk := b | keys[i]<<8&0xffff00
+				origin := order[i]
+				b := *(*byte)(unsafe.Add(dp, origin+nextRel))
 				j := i
-				for j > 0 && keys[j-1]&0xff > b {
+				for j > 0 && *(*byte)(unsafe.Add(dp, order[j-1]+nextRel)) > b {
 					order[j] = order[j-1]
-					keys[j] = keys[j-1]
 					j--
 				}
-				order[j] = pos
-				keys[j] = nk
+				order[j] = origin
 			}
 		}
 	}
