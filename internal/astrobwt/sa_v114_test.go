@@ -59,6 +59,32 @@ func TestV114KAT(t *testing.T) {
 	}
 }
 
+func TestEmitFullGroupRunEqualColumns(t *testing.T) {
+	for _, groups := range []uint32{3, 8, 26} {
+		n := int(groups << 8)
+		data := make([]byte, n+4)
+		for i := 0; i < n; i++ {
+			data[i] = 0x5a
+		}
+		view := stage4View{data: data, logicalLen: uint32(n)}
+		v := newV114Scratch()
+		if !emitFullGroupRunGeneric(&view, 0, groups, v) {
+			t.Fatalf("emit failed for %d groups", groups)
+		}
+		got := make([]int32, n)
+		if !writeFusedRunsToSA(&view, v, got) {
+			t.Fatalf("write failed for %d groups", groups)
+		}
+		want := make([]int32, n)
+		text_32_0alloc(data[:n], want, make([]int32, n/2))
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("%d groups: SA[%d]=%d, want %d", groups, i, got[i], want[i])
+			}
+		}
+	}
+}
+
 // countingSAIS wraps a hash pass and reports how often v114 declined. High
 // fallback rates would silently erase the speedup.
 func TestV114FallbackRate(t *testing.T) {
