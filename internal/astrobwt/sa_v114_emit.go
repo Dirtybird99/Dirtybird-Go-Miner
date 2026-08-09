@@ -173,26 +173,7 @@ func emitFullGroupRunGeneric(view *stage4View, startGroup, groupCount uint32, v 
 	// bounds checks here were ~15% of the SA stage).
 	dp := unsafe.Pointer(&view.data[0])
 	var equalColumns [4]uint64
-	for i := range equalColumns {
-		equalColumns[i] = ^uint64(0)
-	}
-	for chunk := 1; chunk < gc; chunk++ {
-		chunkBase := base + uint32(chunk)<<8
-		for word := uint32(0); word < 32; word++ {
-			offset := word << 3
-			diff := *(*uint64)(unsafe.Add(dp, base+offset)) ^
-				*(*uint64)(unsafe.Add(dp, chunkBase+offset))
-			if diff == 0 {
-				continue
-			}
-			for b := uint32(0); b < 8; b++ {
-				if byte(diff>>(b<<3)) != 0 {
-					rel := offset + b
-					equalColumns[rel>>6] &^= uint64(1) << (rel & 63)
-				}
-			}
-		}
-	}
+	buildEqualColumns((*byte)(unsafe.Add(dp, base)), groupCount, &equalColumns)
 	columnEqual := func(rel int) bool {
 		return equalColumns[rel>>6]&(uint64(1)<<uint(rel&63)) != 0
 	}
