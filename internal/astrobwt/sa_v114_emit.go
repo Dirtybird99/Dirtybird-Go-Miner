@@ -187,9 +187,22 @@ func emitFullGroupRunGeneric(view *stage4View, startGroup, groupCount uint32, v 
 		}
 		v114StatsRecordGenericKeyColumn(equalKey)
 		if equalKey {
-			if !appendOriginGroup(v, firstKey, order, 0, groupCount, relu) {
+			// groupCount >= 3 here. Keep the overwhelmingly common equal-column
+			// append in this loop so the compiler can drop appendOriginGroup's
+			// singleton checks and slice arguments.
+			begin := uint32(len(v.arena))
+			if begin > arenaIndexCount || groupCount > arenaIndexCount-begin {
 				return false
 			}
+			v.arena = v.arena[:begin+groupCount]
+			if groupCount >= 4 {
+				materializeOrigins(&v.arena[begin], &order[0], groupCount, relu)
+			} else {
+				v.arena[begin] = order[0] + relu
+				v.arena[begin+1] = order[1] + relu
+				v.arena[begin+2] = order[2] + relu
+			}
+			v.runs = append(v.runs, stage5Run{key: firstKey, packed: groupCount<<17 + begin})
 		} else {
 			groupStart := 0
 			for groupStart < gc {
