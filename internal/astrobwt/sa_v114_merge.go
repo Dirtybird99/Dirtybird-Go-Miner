@@ -403,11 +403,12 @@ func mergeEqualKeyRuns(view *stage4View, v *v114Scratch) {
 // writeFusedRunsToSA sorts the records and writes the final SA positions.
 func writeFusedRunsToSA(view *stage4View, v *v114Scratch, sa []int32) bool {
 	radixSortRunsByStoredKey(v)
+	logicalLen := len(sa)
 
 	// uint32 view of sa: positions < 2^31, so int32/uint32 bits are identical
 	// and arena runs can be bulk-copied (the C++ memcpys here). buildSAv114
 	// guarantees len(sa) >= 1.
-	saU32 := unsafe.Slice((*uint32)(unsafe.Pointer(&sa[0])), len(sa))
+	saU32 := unsafe.Slice((*uint32)(unsafe.Pointer(&sa[0])), cap(sa))
 
 	runs := v.runs
 	arena := v.arena
@@ -432,10 +433,20 @@ func writeFusedRunsToSA(view *stage4View, v *v114Scratch, sa []int32) bool {
 			} else {
 				begin := r0.begin()
 				count := r0.count()
-				if outPos+int(count) > len(saU32) {
+				if outPos+int(count) > logicalLen {
 					return false
 				}
-				outPos += copy(saU32[outPos:], arena[begin:begin+count])
+				if count <= 8 && outPos+8 <= len(saU32) && int(begin)+8 <= cap(arena) {
+					dst := unsafe.Pointer(&saU32[outPos])
+					src := unsafe.Pointer(&arena[begin])
+					*(*uint64)(dst) = *(*uint64)(src)
+					*(*uint64)(unsafe.Add(dst, 8)) = *(*uint64)(unsafe.Add(src, 8))
+					*(*uint64)(unsafe.Add(dst, 16)) = *(*uint64)(unsafe.Add(src, 16))
+					*(*uint64)(unsafe.Add(dst, 24)) = *(*uint64)(unsafe.Add(src, 24))
+					outPos += int(count)
+				} else {
+					outPos += copy(saU32[outPos:], arena[begin:begin+count])
+				}
 			}
 		} else {
 			var t0 uint64
@@ -474,5 +485,5 @@ func writeFusedRunsToSA(view *stage4View, v *v114Scratch, sa []int32) bool {
 		groupStart = groupEnd
 	}
 
-	return outPos == len(sa)
+	return outPos == logicalLen
 }

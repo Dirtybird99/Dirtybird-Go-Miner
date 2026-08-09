@@ -14,7 +14,7 @@ const MAX_LENGTH uint32 = 277 * 256
 
 type ScratchData struct {
 	data     [MAX_LENGTH + 64]uint8
-	sa       [MAX_LENGTH]int32
+	sa       [MAX_LENGTH + 8]int32
 	sa_bytes *[(MAX_LENGTH) * 4]uint8
 
 	// v114 descriptor-SA state: template markers recorded by the wolf loop
