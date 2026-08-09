@@ -413,9 +413,18 @@ func writeFusedRunsToSA(view *stage4View, v *v114Scratch, sa []int32) bool {
 	runs := v.runs
 	arena := v.arena
 	n := len(runs)
+	saPtr := unsafe.SliceData(saU32)
+	runsPtr := unsafe.SliceData(runs)
+	arenaPtr := unsafe.SliceData(arena)
 	groupStart := 0
 	outPos := 0
 	for groupStart < n {
+		if uniqueRunBatchAvailable {
+			groupStart, outPos = writeUniqueRunBatch(saPtr, runsPtr, arenaPtr, n, groupStart, outPos, logicalLen, cap(arena))
+			if groupStart == n {
+				break
+			}
+		}
 		r0 := runs[groupStart]
 		groupEnd := groupStart + 1
 		for groupEnd < n && runs[groupEnd].key == r0.key {
