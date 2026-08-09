@@ -604,6 +604,40 @@ but it is not placed in the matched table because the C trainer is a different
 harness. Raw cross-miner evidence is under ignored
 `bench-results/head-to-head-{x1,x2}-final`.
 
+### 2026-08-09 x2 parity continuation
+
+The next campaign retained five direct-parent improvements on the same
+i7-13700HX/Go 1.26.5/`GOAMD64=v3` stack: fixed group origins (+3.254% micro),
+unconditional short-run 32-byte copies (+1.835%), AVX2 origin materialization
+(+2.505%), AVX2 uniform-column detection (+2.051%), and an inlined common
+equal-column append (+1.045%). The last item produced a four-leg 20T x2
+B-C-C-B steady median of 24.500 versus 23.795 KH/s (+2.96%).
+
+An amd64 kernel that consumes whole stretches of unique literal/short-arena
+runs then improved x2 micro by **+1.903%**, 95% CI **[+0.867%, +2.949%]**,
+one-sided lower **+1.046%**. Its pre-bounds-check prototype produced a
+four-leg steady median of 24.940 versus 24.155 KH/s (+3.25%); the final safe
+kernel still needs the campaign's long exact-binary sustained block before
+that 20T estimate is promoted. Normal and `v114stats` suites, focused race,
+`GOAMD64=v1`, Linux arm64, and Linux s390x gates pass. The retained local head
+is `2da586c`; it has not been pushed or released because exact C parity is not
+yet established.
+
+The current best observed 20T x2 steady intervals are **24.81-25.07 KH/s**,
+about 35% above the immutable v0.2.2 x1 baseline (18.45 KH/s) but still about
+9% below the exact C artifact (27.452 KH/s). A post-change stage profile puts
+66.91% in V114 SA construction: radix 18.01%, unique-run kernel 15.85%, and
+generic emission 16.38% cumulative; x2 SHA is 20.65% and remains out of scope.
+
+New dead ends, all reverted: fresh x2 PGO (+0.765%, lower +0.186%), raw-pointer
+radix scatter (+0.235%, CI crossing zero), literal-pair specialization
+(-0.931%), deferred origin materialization (-9.320%), and four-literal kernel
+unrolling (-3.481%). Earlier stage-2 rejects also include all-arena retry
+(-5.0% sustained), emit-time histograms (+0.57% sustained), 12-bit radix,
+and variable-width copy branches. These results reinforce two host-specific
+rules: contiguous materialized positions beat deferred gathers, and compact
+assembly loops beat speculative unrolling.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
