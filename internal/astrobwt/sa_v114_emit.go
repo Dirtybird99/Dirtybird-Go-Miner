@@ -80,8 +80,12 @@ func appendOriginGroup(v *v114Scratch, key uint32, origins []uint32, first, coun
 		return false
 	}
 	v.arena = v.arena[:begin+count]
-	for i := uint32(0); i < count; i++ {
-		v.arena[begin+i] = origins[first+i] + rel
+	if count >= 4 {
+		materializeOrigins(&v.arena[begin], &origins[first], count, rel)
+	} else {
+		for i := uint32(0); i < count; i++ {
+			v.arena[begin+i] = origins[first+i] + rel
+		}
 	}
 	v.runs = append(v.runs, stage5Run{key: key, packed: count<<17 + begin})
 	return true
