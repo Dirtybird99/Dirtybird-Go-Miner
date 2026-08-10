@@ -25,7 +25,13 @@ jobs:
           sudo apt-get install -y -qq shellcheck qemu-user-static libc6-arm64-cross
       - name: Vet
         run: go vet ./...
-      - name: Test
+      - name: Test (GOAMD64=v1)
+        env:
+          GOAMD64: v1
+        run: go test ./...
+      - name: Test (GOAMD64=v3)
+        env:
+          GOAMD64: v3
         run: go test ./...
       - name: Benchmark matrix smoke
         if: runner.os == 'Windows'
@@ -91,6 +97,8 @@ jobs:
           done < <(git ls-files '*.sh')
           git ls-files -z '*.sh' | xargs -0 shellcheck --severity=error
       - name: Build + selftest
+        env:
+          GOAMD64: v3
         shell: bash
         run: |
           go build -pgo=default.pgo -trimpath -o go-miner-ci .
