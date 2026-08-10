@@ -61,16 +61,17 @@ jobs:
         run: |
           set -euo pipefail
           go vet -mod=readonly ./...
-          go test -mod=readonly ./...
+          GOAMD64=v1 go test -mod=readonly ./...
+          GOAMD64=v3 go test -mod=readonly ./...
           # The differential gate must PROVE it ran: a renamed test exits 0
           # with "no tests to run" and a renamed env var exits 0 via t.Skip,
           # so require the test's own success line in the output. 250008
           # hashes is sized for a 4-vCPU hosted runner (~6 min); the
           # million-hash run remains the local pre-release standard.
-          V114_GATE_HASHES=250008 go test -mod=readonly -count=1 -timeout=30m -v \
+          GOAMD64=v3 V114_GATE_HASHES=250008 go test -mod=readonly -count=1 -timeout=30m -v \
             -run '^TestV114MillionHashGate$' ./internal/astrobwt | tee v114gate.log
           grep -q "V114 GATE: .* hashes matched" v114gate.log
-          go test -mod=readonly -race -count=1 -timeout=30m ./internal/...
+          GOAMD64=v3 go test -mod=readonly -race -count=1 -timeout=30m ./internal/...
           bash config/test-h-stats.sh
 
       - name: Build release assets
@@ -147,10 +148,12 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.ver.outputs.version }}"
+          notes_start=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
           assets=(dist/*.zip dist/*.tar.gz dist/SHA256SUMS.txt)
           gh release create "$tag" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "Dirtybird Go Miner $tag" --generate-notes
+            --title "Dirtybird Go Miner $tag" --generate-notes \
+            --notes-start-tag "$notes_start"
           test "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
             --json isImmutable --jq '.isImmutable')" = true
           for attempt in 1 2 3; do

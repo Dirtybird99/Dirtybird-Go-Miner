@@ -96,7 +96,7 @@ def main(path):
     print(f"  95% CI         : [{pct(d - two * se_d):+.3f}%, {pct(d + two * se_d):+.3f}%]")
     print(f"  one-sided 95% lower bound: {pct(d - one * se_d):+.3f}%")
     print(f"  linear drift   : {pct(beta[1]):+.3f}%/leg, quadratic: {pct(beta[2]):+.4f}%/leg^2")
-    print("\nretention needs: point >= +2% AND one-sided lower bound > 0 at the primary target.")
+    print("\nretention needs: one-sided 95% lower bound > +0.6% at either target; the other target needs point >= -0.5% and CI upper >= -0.5%.")
 
 
 def selftest():

@@ -617,11 +617,30 @@ An amd64 kernel that consumes whole stretches of unique literal/short-arena
 runs then improved x2 micro by **+1.903%**, 95% CI **[+0.867%, +2.949%]**,
 one-sided lower **+1.046%**. Its pre-bounds-check prototype produced a
 four-leg steady median of 24.940 versus 24.155 KH/s (+3.25%); the final safe
-kernel still needs the campaign's long exact-binary sustained block before
-that 20T estimate is promoted. Normal and `v114stats` suites, focused race,
-`GOAMD64=v1`, Linux arm64, and Linux s390x gates pass. The retained local head
-is `2da586c`; it has not been pushed or released because exact C parity is not
-yet established.
+kernel was then measured as part of the full Stage2 release candidate against
+frozen main `67e661b` (`GOAMD64=v3`, committed `default.pgo`). The cumulative
+x2 micro result over 20 alternating P-core couples was **+25.150%**, 95% CI
+**[+24.348%, +25.958%]**, one-sided lower **+24.487%**.
+
+The binding 20-thread x2 run used the full discarded-warmup, eight-leg
+Thue-Morse protocol at 240 seconds/leg. Base steady legs were 19.6325,
+19.7550, 19.8225, and 19.8425 KH/s (median 19.7888); candidate legs were
+24.3575, 24.7500, 24.8225, and 24.8300 KH/s (median **24.7863**, +25.254%).
+The drift-adjusted treatment was **+24.927%**, 95% CI **[+22.800%,
++27.090%]**, one-sided lower **+23.290%**. This decisively clears the relaxed
+retention gate but remains about 9.7% below the separately measured C artifact,
+so it is a proven Go release gain, not a C-parity claim.
+
+Final review found that the AVX2 origin materializer rounds every call up to
+an eight-lane load/store. The logical limits remain unchanged, but `order`
+and `arena` now carry eight backing elements of padding, with a focused test at
+both logical ends. Portable/v3 suites, `v114stats`, race, analyzer selftest,
+arm64/s390x cross-compiles, release selftest, and 1,000,008 V114-vs-SAIS
+executions all pass with zero mismatches and zero fallbacks. Frozen executable
+SHA-256: base `C4D7AA20B96FB52C2F69C998DE42956ED4F5F8878125F5248AD03B70E190C083`,
+candidate `F4B08A02F63B87B7526FE2A0CAEC332C0BDC55249CC1C532D799405BCD08FF97`.
+Raw evidence is under ignored `bench-results/micro-couples/20260809-*` and
+`bench-results/thue-morse/20260809-192028-v0.2.4-stage2-final-x2`.
 
 The current best observed 20T x2 steady intervals are **24.81-25.07 KH/s**,
 about 35% above the immutable v0.2.2 x1 baseline (18.45 KH/s) but still about
