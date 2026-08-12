@@ -72,7 +72,25 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The action hard-fails with "Dependency review is not supported on this
+      # repository" when the dependency graph is off -- a repo setting, not
+      # anything a pull request can fix. The C and Zig miners have it on, which is
+      # why their copies of this job work. Detect it and say so in the log rather
+      # than painting every PR red over a checkbox; the moment the setting is
+      # flipped this starts doing real work with no edit here.
+      - name: Check the dependency graph is available
+        id: graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/dependency-graph/sbom" > /dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Dependency graph is disabled for this repository, so dependency review cannot run. Enable it under Settings -> Code security -> Dependency graph."
+          fi
       - uses: actions/dependency-review-action@v4
+        if: steps.graph.outputs.enabled == 'true'
         with:
           fail-on-severity: critical
 
@@ -96,10 +114,15 @@ jobs:
           echo "OK: no tracked binary artifacts."
       - name: Warn on large files
         run: |
+          # The `if` is load-bearing, not style. Written as `[ ... ] && echo`, the
+          # test is the loop body's last command and is false for every normal
+          # file, so the loop exits 1, the command substitution inherits it, and
+          # the default `bash -e` shell fails the step -- on a clean repo, which is
+          # exactly the case this is meant to be silent for.
           large=$(git ls-files | while read -r f; do
             [ -f "$f" ] || continue
             s=$(stat -c%s "$f")
-            [ "$s" -gt 10485760 ] && echo "$f ($((s / 1048576))MB)"
+            if [ "$s" -gt 10485760 ]; then echo "$f ($((s / 1048576))MB)"; fi
           done)
           if [ -n "$large" ]; then
             echo "::warning::Files larger than 10MB are tracked:"; echo "$large"
