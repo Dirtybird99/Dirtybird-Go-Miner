@@ -1,0 +1,65 @@
+name: Benchmarks
+
+# Parity with the C and Zig miners. Hosted runners are shared and thermally
+# throttled, so nothing here is a headline number -- it is a throughput smoke
+# test that catches an accidental order-of-magnitude regression. The real
+# measurement is BENCHMARKING.md and the arm64-bench workflow.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  synthetic-benchmark:
+    name: Synthetic Benchmark (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux, os: ubuntu-latest }
+          - { name: Windows, os: windows-latest }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+
+      # GOAMD64=v3 is what the release binaries are built with, so benchmark the
+      # code that actually ships rather than the baseline fallback.
+      - name: Run the AstroBWTv3 hash benchmarks
+        shell: bash
+        env:
+          GOAMD64: v3
+        run: |
+          go test -mod=readonly -run '^$' -bench 'BenchmarkHash|BenchmarkSHA256' \
+            -benchtime=2s ./internal/astrobwt 2>&1 | tee "bench-${{ matrix.name }}.txt"
+          # `go test` reports a failed benchmark in its output but still exits 0 in
+          # some paths; require the terminal ok/PASS line so a broken bench is red.
+          grep -qE '^(ok|PASS)' "bench-${{ matrix.name }}.txt"
+
+      - name: Job summary
+        shell: bash
+        run: |
+          {
+            echo "### Synthetic benchmark (${{ matrix.name }})"
+            echo '```'
+            grep -E "^Benchmark" "bench-${{ matrix.name }}.txt" || cat "bench-${{ matrix.name }}.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: benchmark-${{ matrix.name }}
+          path: bench-${{ matrix.name }}.txt
