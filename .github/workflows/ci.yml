@@ -96,6 +96,12 @@ jobs:
             bash -n "$script"
           done < <(git ls-files '*.sh')
           git ls-files -z '*.sh' | xargs -0 shellcheck --severity=error
+      # Also gated at release time, but by then the PR that broke it has merged.
+      # A stats regression is invisible except as an N/A hashrate on a rig.
+      - name: HiveOS stats parser
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash config/test-h-stats.sh
       - name: Build + selftest
         env:
           GOAMD64: v3
