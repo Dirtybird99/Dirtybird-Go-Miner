@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-. "${HIVE_MANIFEST:-/hive/miners/custom/dirtybird-go-miner/h-manifest.conf}"
+# Fall back to the manifest beside this script rather than a fixed
+# /hive/miners/custom/<name> path: mmpOS installs elsewhere, and the absolute
+# form breaks silently if CUSTOM_NAME or the install root ever moves.
+# BASH_SOURCE, not $0 -- the agent sources this file. HIVE_MANIFEST stays as the
+# override hook test-h-stats.sh uses.
+. "${HIVE_MANIFEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/h-manifest.conf}"
 
 # go-miner has no HTTP stats API; Hive forces the family status line into the
 # log as a plain newline record. The parser also tolerates older CR/ANSI logs:
@@ -15,7 +20,10 @@ acc=0
 rej=0
 
 if [[ -f $LOG ]]; then
-    line=$(tail -c 16384 "$LOG" 2>/dev/null | tr '\r' '\n' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep 'KH/s' | tail -n1)
+    # `|| true`: a log with no status line yet (startup, or a reconnect) makes
+    # grep exit 1, which would abort the whole hook if the agent ever sources it
+    # under `set -e`. Nothing has gone wrong -- the miner just has not printed.
+    line=$(tail -c 16384 "$LOG" 2>/dev/null | tr '\r' '\n' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep 'KH/s' | tail -n1 || true)
     if [[ -n $line ]]; then
         khs=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+ KH/s' | head -n1 | grep -oE '[0-9]+\.[0-9]+')
         acc=$(echo "$line" | grep -oE 'Miniblocks:[0-9]+' | grep -oE '[0-9]+')
@@ -39,7 +47,8 @@ stats=$(cat <<-END
     "hs_units": "khs",
     "uptime": $uptime,
     "ar": [$acc, $rej],
-    "algo": "ASTROBWT"
+    "algo": "ASTROBWT",
+    "ver": "${CUSTOM_VERSION:-dev}"
 }
 END
 )

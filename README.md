@@ -30,6 +30,21 @@ Grab the latest [release](https://github.com/Dirtybird99/Dirtybird-Go-Miner/rele
 
 Verify downloads with `SHA256SUMS.txt`.
 
+### HiveOS / MMPOS
+
+Create a flight sheet with miner `Custom`:
+
+| Field | Value |
+|---|---|
+| Miner name | `dirtybird-go-miner` |
+| Installation URL | the `hiveos_mmpos.amd64.tar.gz` asset URL from the latest release |
+| Hash algorithm | `astrobwt` |
+| Wallet and worker template | `%WAL%.%WORKER_NAME%` |
+
+The miner name must match exactly: it is `CUSTOM_NAME` in `config/h-manifest.conf` and the top-level directory inside the archive, and HiveOS looks the package up by that name. Anything else fails to install.
+
+There is no stats API, so `h-stats.sh` scrapes hashrate, accepted/rejected miniblocks and uptime from the status line in the log. `config/test-h-stats.sh` pins that parser and runs in CI.
+
 ## Quick start
 
 ```
