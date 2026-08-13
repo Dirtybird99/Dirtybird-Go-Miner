@@ -711,6 +711,47 @@ regression. Combined with the scratch share, the kata lands ~+0.9% sustained
 and ~-53 MiB at 20 threads. Requires the "Lock pages in memory" user right;
 without it the binary silently runs exactly as before.
 
+## 2026-08-13 profile-driven BCE campaign (kata-7) — gap LOCATED, ceiling measured
+
+First actual pprof of the miner (`BenchmarkHashV114`, GOAMD64=v3, PGO): flat
+share radix `radixSortRunsByStoredKey` 16.0%, `writeUniqueRunBatch` (asm) 15.2%,
+`emitFullGroupRunGeneric` 11.5%, `compareSuffixesAfterKey`+inlined wrapper
+~4.6% cum, `mergeSortedPositionsAfterKey` 2.3%. The gap is DIFFUSE — no smoking
+gun; each pure-Go stage runs a few % behind Zig's LLVM output. A parallel deep-
+research pass (ByteDance TangoLLVM) independently put the gc-vs-LLVM floor at
+~5-9% on analogous pointer-chasing/integer code. Bounds-check enum
+(`-d=ssa/check_bce/debug=1`) confirmed the surviving checks; `suffixLessAfterKey`
+is already PGO-inlined.
+
+Attacked the located BCE levers, each byte-exact (1,000,008-hash differential,
+0 fallbacks; full suite + zero-alloc green):
+
+- **Comparator raw-pointer BE-u64 loads** (`compareSuffixesAfterKey`: replace
+  the per-call `v.data[a+3:]`/`v.data[b+3:]` slice headers + `bytes.Compare`
+  hot path with `bits.ReverseBytes64(*(*uint64)(unsafe.Add(dp,off)))`) —
+  **+0.947% micro** (CI [+0.395,+1.503], one-sided lower +0.491). The one real
+  lever; reopened on the relaxed gate (the old inline-comparator candidate was
+  killed under the +2% gate).
+- **k-way merge inner loop** (`mergeSortedPositionsAfterKey` raw-pointer
+  reads/writes) — stacked; comparator+merge **+0.439% sustained** 20T Thue-Morse
+  (24.75 → 24.86, positive but floor-adjacent). KEPT (byte-exact, positive).
+- **Radix scatter raw-pointer writes** — **NULL** (full stack fell to +0.549%
+  micro, CI [-0.604,+1.714] crossing zero). Confirms the prior ledger null:
+  this loop is memory-latency-bound on the random scatter to ~20k positions, so
+  the bounds check hides behind the cache miss. **REVERTED.**
+
+**Measured ceiling (the honest answer to "genuine parity"):** BCE recovers ~0.4-
+0.9% per lever and the levers are exhausted (memory-bound loops null; the two
+biggest flat functions are asm or memory-stalled). kata-7 = ~+0.44% sustained;
+with kata-5 the two campaigns total ~+1.4% (24.79 → ~25.1). **Pure-Go parity
+with C++ (27.5) / Zig (31.3) is NOT reachable on this workload** — the residual
+is a real gc-vs-LLVM codegen floor (~5-9%, corroborated four ways this session:
+this pprof, TangoLLVM, archsimd comparator 1.59× slower, goat/clang-22 radix
+1.5% slower in a fair harness) plus cache-miss latency in the radix that no
+in-source rewrite touches. Closing it further needs hand-Go-asm on the inner
+loops (won't help the memory stalls) or a fundamentally lower-work SA
+decomposition than the whole miner family uses.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
