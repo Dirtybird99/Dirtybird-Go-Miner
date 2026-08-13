@@ -14,7 +14,6 @@ package astrobwt
 
 import (
 	"sync/atomic"
-	"unsafe"
 )
 
 const (
@@ -66,32 +65,7 @@ func newV114Scratch() *v114Scratch {
 	const (
 		orderCap = stage4MaxGroupRun + 8
 		arenaCap = arenaIndexCount + 8
-		segments = 8
-		segAlign = 64
 	)
-	total := uintptr(orderCap*4+arenaCap*4) +
-		uintptr(MAX_LENGTH)*(8+8+4+4+4+4) + segments*segAlign
-	// The backing arrays hold only integer values, so slice headers on the Go
-	// heap over a VirtualAlloc'd region are GC-safe; growth past a capacity
-	// falls back to an ordinary heap append transparently.
-	if base := largePageAlloc(total); base != nil {
-		off := uintptr(0)
-		carve := func(bytes uintptr) unsafe.Pointer {
-			p := unsafe.Pointer(&base[off])
-			off += (bytes + segAlign - 1) &^ (segAlign - 1)
-			return p
-		}
-		return &v114Scratch{
-			order:    unsafe.Slice((*uint32)(carve(orderCap*4)), orderCap)[:0],
-			arena:    unsafe.Slice((*uint32)(carve(arenaCap*4)), arenaCap)[:0],
-			runs:     unsafe.Slice((*stage5Run)(carve(uintptr(MAX_LENGTH)*8)), MAX_LENGTH)[:0],
-			radixTmp: unsafe.Slice((*stage5Run)(carve(uintptr(MAX_LENGTH)*8)), MAX_LENGTH),
-			groupPos: unsafe.Slice((*uint32)(carve(uintptr(MAX_LENGTH)*4)), MAX_LENGTH)[:0],
-			mergePos: unsafe.Slice((*uint32)(carve(uintptr(MAX_LENGTH)*4)), MAX_LENGTH),
-			runLens:  unsafe.Slice((*uint32)(carve(uintptr(MAX_LENGTH)*4)), MAX_LENGTH)[:0],
-			nextLens: unsafe.Slice((*uint32)(carve(uintptr(MAX_LENGTH)*4)), MAX_LENGTH)[:0],
-		}
-	}
 	return &v114Scratch{
 		order:    make([]uint32, 0, orderCap),
 		arena:    make([]uint32, 0, arenaCap),

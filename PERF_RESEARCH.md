@@ -707,9 +707,16 @@ failure). The sustained-bench summary line now prints `largepages=`.
   KH/s, +0.899%**, every rank-paired leg positive (+0.76%…+1.62%).
 
 Clears the relaxed retention gate at the 20T target with no demonstrated 1T
-regression. Combined with the scratch share, the kata lands ~+0.9% sustained
-and ~-53 MiB at 20 threads. Requires the "Lock pages in memory" user right;
-without it the binary silently runs exactly as before.
+regression. Requires the "Lock pages in memory" user right; without it the
+binary silently runs exactly as before.
+
+**NOT shipped in v0.2.18 (2026-08-13):** `go vet`'s `unsafeptr` analyzer flags
+the `uintptr`->`unsafe.Pointer` conversion of the `VirtualAlloc` return
+(`largepage_windows.go:75`), which the CI test job runs. The +0.899% is real and
+measured, but shipping needs a vet-clean allocator wrapper (or an asm stub that
+returns `unsafe.Pointer`). Reverted the code from the ship branch; the finding
+stands as a documented follow-up. What shipped is the scratch share (-53 MiB,
++0.26%) + the kata-7 comparator/merge BCE (+0.44%).
 
 ## 2026-08-13 profile-driven BCE campaign (kata-7) — gap LOCATED, ceiling measured
 
