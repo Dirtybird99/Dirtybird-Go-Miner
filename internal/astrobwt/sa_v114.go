@@ -62,9 +62,13 @@ type v114Scratch struct {
 }
 
 func newV114Scratch() *v114Scratch {
+	const (
+		orderCap = stage4MaxGroupRun + 8
+		arenaCap = arenaIndexCount + 8
+	)
 	return &v114Scratch{
-		order:    make([]uint32, 0, stage4MaxGroupRun+8),
-		arena:    make([]uint32, 0, arenaIndexCount+8),
+		order:    make([]uint32, 0, orderCap),
+		arena:    make([]uint32, 0, arenaCap),
 		runs:     make([]stage5Run, 0, MAX_LENGTH),
 		radixTmp: make([]stage5Run, MAX_LENGTH),
 		groupPos: make([]uint32, 0, MAX_LENGTH),

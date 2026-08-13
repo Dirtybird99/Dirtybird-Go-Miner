@@ -8,7 +8,7 @@ package astrobwt
 
 import (
 	"bytes"
-	"encoding/binary"
+	"math/bits"
 	"unsafe"
 )
 
@@ -35,21 +35,25 @@ func compareSuffixesAfterKey(v *stage4View, a, b uint32) int {
 	}
 
 	common := commonWithKey - 3
-	ap := v.data[a+3:]
-	bp := v.data[b+3:]
 	if common >= 8 {
-		av := binary.BigEndian.Uint64(ap)
-		bv := binary.BigEndian.Uint64(bp)
+		// The eight bytes after the shared key, read as one big-endian word
+		// through raw pointers: no per-call slice header, no bounds check.
+		// In bounds because common>=8 => min(aLen,bLen)>=11, so a+10 and b+10
+		// stay below logicalLen<=len(data). BSWAP makes the native LE load a
+		// lexicographic compare, exactly binary.BigEndian.Uint64.
+		dp := unsafe.Pointer(&v.data[0])
+		av := bits.ReverseBytes64(*(*uint64)(unsafe.Add(dp, uintptr(a)+3)))
+		bv := bits.ReverseBytes64(*(*uint64)(unsafe.Add(dp, uintptr(b)+3)))
 		if av != bv {
 			if av < bv {
 				return -1
 			}
 			return 1
 		}
-		if c := bytes.Compare(ap[8:common], bp[8:common]); c != 0 {
+		if c := bytes.Compare(v.data[a+11:a+3+common], v.data[b+11:b+3+common]); c != 0 {
 			return c
 		}
-	} else if c := bytes.Compare(ap[:common], bp[:common]); c != 0 {
+	} else if c := bytes.Compare(v.data[a+3:a+3+common], v.data[b+3:b+3+common]); c != 0 {
 		return c
 	}
 	if aLen == bLen {
@@ -87,6 +91,9 @@ func radixSortRunsByStoredKey(v *v114Scratch) {
 		counts2[(runs[i].key>>16)&0xff]++
 	}
 
+	// NOTE: raw-pointer scatter writes here measured NULL (kata-7, and the
+	// prior ledger entry): this loop is memory-latency-bound on the random
+	// scatter, so the bounds check hides behind the cache miss. Kept checked.
 	var sum uint32
 	for i := 0; i < 256; i++ {
 		c := counts2[i]
@@ -331,28 +338,35 @@ func tryWriteTwoRuns(view *stage4View, arena []uint32, runs []stage5Run, sa []in
 }
 
 func mergeSortedPositionsAfterKey(view *stage4View, src []uint32, leftBegin, leftEnd, rightEnd int, dst []uint32, dstBegin int, cmps *int) {
+	// Raw-pointer reads/writes: left<leftEnd<=len(src), right<rightEnd<=len(src),
+	// and out spans dstBegin..dstBegin+(rightEnd-leftBegin)-1 < len(dst) by the
+	// caller's sizing — all provable, none proven by gc, so drop the checks.
+	// src/dst are the MAX_LENGTH scratch buffers, always non-empty.
+	sp := unsafe.Pointer(&src[0])
+	dp := unsafe.Pointer(&dst[0])
 	left, right, out := leftBegin, leftEnd, dstBegin
 	for left < leftEnd && right < rightEnd {
 		if V114StatsEnabled {
 			*cmps++
 		}
-		lpos, rpos := src[left], src[right]
+		lpos := *(*uint32)(unsafe.Add(sp, uintptr(left)*4))
+		rpos := *(*uint32)(unsafe.Add(sp, uintptr(right)*4))
 		if suffixLessAfterKey(view, lpos, rpos) {
-			dst[out] = lpos
+			*(*uint32)(unsafe.Add(dp, uintptr(out)*4)) = lpos
 			left++
 		} else {
-			dst[out] = rpos
+			*(*uint32)(unsafe.Add(dp, uintptr(out)*4)) = rpos
 			right++
 		}
 		out++
 	}
 	for left < leftEnd {
-		dst[out] = src[left]
+		*(*uint32)(unsafe.Add(dp, uintptr(out)*4)) = *(*uint32)(unsafe.Add(sp, uintptr(left)*4))
 		left++
 		out++
 	}
 	for right < rightEnd {
-		dst[out] = src[right]
+		*(*uint32)(unsafe.Add(dp, uintptr(out)*4)) = *(*uint32)(unsafe.Add(sp, uintptr(right)*4))
 		right++
 		out++
 	}

@@ -657,6 +657,108 @@ and variable-width copy branches. These results reinforce two host-specific
 rules: contiguous materialized positions beat deferred gathers, and compact
 assembly loops beat speculative unrolling.
 
+## 2026-08-13 working-set campaign (kata-5)
+
+Premise under test: the ~21% sustained gap to the Zig miner (24.79 vs 31.30
+KH/s at 20T×120s) is memory pressure — this miner carried ~6.28 MiB of hot
+scratch per thread (2× ScratchData + 2× v114Scratch) versus Zig's ~2.06 MiB,
+and Zig documents its lane-shared SA scratch as a measured working-set halving
+with a 12-16-thread break point.
+
+**Change: share one `v114Scratch` across the two x2 lanes** (`hasher.go`; the
+SA working scratch is lane-transient — every `buildSAv114` call rewrites it
+before reading, and lane B starts only after lane A's suffix array is fully in
+`sa_bytes`). Removes ~2.67 MiB/thread (~53 MiB at 20T). Also corrected the
+stale `Hasher` comment that claimed the per-lane duplication mirrored the zig
+miner — Zig duplicates Workers but SHARES its SA scratch.
+
+Measured (both instruments, gates green incl. the full astrobwt suite):
+- micro couples ×20 (`^BenchmarkHashPairV114$`, 600x, affinity 0x1):
+  **+0.810%**, 95% CI [-0.169%, +1.797%], one-sided lower **+0.001%**.
+- Thue-Morse 8-leg 240 s @ 20T: base median 24.7338, cand 24.7975 →
+  **+0.258%** — below the ~0.6% attribution floor.
+
+**Verdict: retained as a footprint/hygiene change, not a performance claim**
+(positive sign on both instruments, no regression indication, halves pair-mode
+scratch). **The working-set hypothesis for the Zig gap is REFUTED at this
+size scale**: cutting 2.67 MiB/thread moved 20T by ~0.26%. A fresh 1T x2
+datum (2.11 KH/s here vs ~2.56 derived for Zig) puts the gap at ~-17.6%
+already at ONE thread — the deficit is predominantly load-independent
+per-hash execution cost, not cache capacity. Right-sizing the merge vectors
+(~1 MiB more) was skipped for the same reason; the cached-prefix retest
+condition (slices winning) was not met.
+
+### 2 MiB large pages under the v114 scratch — measured, KEPT
+
+The capacity story being dead left TLB walk frequency — the mechanism the zig
+miner actually cites (Gracemont's 48-entry L1 DTLB) and the one deployment
+feature both faster siblings have that this miner lacked. `largePageAlloc`
+(`largepage_windows.go`) enables `SeLockMemoryPrivilege` best-effort, lets
+`VirtualAlloc(MEM_LARGE_PAGES)` adjudicate, and `newV114Scratch` carves its
+eight integer-only backing arrays out of the region (64-byte aligned; slice
+headers stay on the Go heap so the GC never sees the region; growth past a
+capacity falls back to an ordinary heap append; ordinary allocation on any
+failure). The sustained-bench summary line now prints `largepages=`.
+
+- micro couples ×20 vs the shared-scratch base: **-0.158%**, 95% CI
+  [-0.965%, +0.655%] — no 1T regression (one pinned thread barely exercises
+  the page walkers).
+- Thue-Morse 8-leg 240 s @ 20T vs the same base: median 24.7425 → **24.965
+  KH/s, +0.899%**, every rank-paired leg positive (+0.76%…+1.62%).
+
+Clears the relaxed retention gate at the 20T target with no demonstrated 1T
+regression. Requires the "Lock pages in memory" user right; without it the
+binary silently runs exactly as before.
+
+**NOT shipped in v0.2.18 (2026-08-13):** `go vet`'s `unsafeptr` analyzer flags
+the `uintptr`->`unsafe.Pointer` conversion of the `VirtualAlloc` return
+(`largepage_windows.go:75`), which the CI test job runs. The +0.899% is real and
+measured, but shipping needs a vet-clean allocator wrapper (or an asm stub that
+returns `unsafe.Pointer`). Reverted the code from the ship branch; the finding
+stands as a documented follow-up. What shipped is the scratch share (-53 MiB,
++0.26%) + the kata-7 comparator/merge BCE (+0.44%).
+
+## 2026-08-13 profile-driven BCE campaign (kata-7) — gap LOCATED, ceiling measured
+
+First actual pprof of the miner (`BenchmarkHashV114`, GOAMD64=v3, PGO): flat
+share radix `radixSortRunsByStoredKey` 16.0%, `writeUniqueRunBatch` (asm) 15.2%,
+`emitFullGroupRunGeneric` 11.5%, `compareSuffixesAfterKey`+inlined wrapper
+~4.6% cum, `mergeSortedPositionsAfterKey` 2.3%. The gap is DIFFUSE — no smoking
+gun; each pure-Go stage runs a few % behind Zig's LLVM output. A parallel deep-
+research pass (ByteDance TangoLLVM) independently put the gc-vs-LLVM floor at
+~5-9% on analogous pointer-chasing/integer code. Bounds-check enum
+(`-d=ssa/check_bce/debug=1`) confirmed the surviving checks; `suffixLessAfterKey`
+is already PGO-inlined.
+
+Attacked the located BCE levers, each byte-exact (1,000,008-hash differential,
+0 fallbacks; full suite + zero-alloc green):
+
+- **Comparator raw-pointer BE-u64 loads** (`compareSuffixesAfterKey`: replace
+  the per-call `v.data[a+3:]`/`v.data[b+3:]` slice headers + `bytes.Compare`
+  hot path with `bits.ReverseBytes64(*(*uint64)(unsafe.Add(dp,off)))`) —
+  **+0.947% micro** (CI [+0.395,+1.503], one-sided lower +0.491). The one real
+  lever; reopened on the relaxed gate (the old inline-comparator candidate was
+  killed under the +2% gate).
+- **k-way merge inner loop** (`mergeSortedPositionsAfterKey` raw-pointer
+  reads/writes) — stacked; comparator+merge **+0.439% sustained** 20T Thue-Morse
+  (24.75 → 24.86, positive but floor-adjacent). KEPT (byte-exact, positive).
+- **Radix scatter raw-pointer writes** — **NULL** (full stack fell to +0.549%
+  micro, CI [-0.604,+1.714] crossing zero). Confirms the prior ledger null:
+  this loop is memory-latency-bound on the random scatter to ~20k positions, so
+  the bounds check hides behind the cache miss. **REVERTED.**
+
+**Measured ceiling (the honest answer to "genuine parity"):** BCE recovers ~0.4-
+0.9% per lever and the levers are exhausted (memory-bound loops null; the two
+biggest flat functions are asm or memory-stalled). kata-7 = ~+0.44% sustained;
+with kata-5 the two campaigns total ~+1.4% (24.79 → ~25.1). **Pure-Go parity
+with C++ (27.5) / Zig (31.3) is NOT reachable on this workload** — the residual
+is a real gc-vs-LLVM codegen floor (~5-9%, corroborated four ways this session:
+this pprof, TangoLLVM, archsimd comparator 1.59× slower, goat/clang-22 radix
+1.5% slower in a fair harness) plus cache-miss latency in the radix that no
+in-source rewrite touches. Closing it further needs hand-Go-asm on the inner
+loops (won't help the memory stalls) or a fundamentally lower-work SA
+decomposition than the whole miner family uses.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest

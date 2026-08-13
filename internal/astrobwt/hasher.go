@@ -12,8 +12,11 @@ const (
 
 // Hasher computes DERO AstroBWTv3 hashes with a persistent, caller-owned
 // scratch buffer. Not safe for concurrent use: one Hasher per worker.
-// scratch2 exists only after the first HashPair call (pair mode doubles the
-// per-worker memory, like the zig miner's 2-workers-per-thread design).
+// scratch2 exists only after the first HashPair call. Pair mode duplicates
+// only the per-lane stream state (the two suffix arrays must coexist for the
+// batched final SHA); the v114 SA working scratch is lane-transient — each
+// build fully rewrites it before reading — so both lanes share one, the same
+// split the zig miner uses (per-lane Workers, one shared SA scratch).
 type Hasher struct {
 	scratch  *ScratchData
 	scratch2 *ScratchData
@@ -49,6 +52,11 @@ func (h *Hasher) HashPair(a, b []byte) (ha, hb [32]byte) {
 		h.scratch2.useV114 = h.scratch.useV114
 	}
 	la := astroBWTv3Stream(a, h.scratch)
+	// Lane B starts only after lane A's suffix array is fully written to
+	// scratch.sa_bytes, so the SA working scratch never carries live state
+	// between lanes; sharing it halves the pair-mode working set. Assigned
+	// after lane A because the first build may allocate it lazily.
+	h.scratch2.v114 = h.scratch.v114
 	lb := astroBWTv3Stream(b, h.scratch2)
 	ts := stageMark()
 	ha, hb = sha256Sum256Pair(h.scratch.sa_bytes[:la*4], h.scratch2.sa_bytes[:lb*4])
