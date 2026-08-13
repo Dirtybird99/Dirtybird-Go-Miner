@@ -686,10 +686,30 @@ datum (2.11 KH/s here vs ~2.56 derived for Zig) puts the gap at ~-17.6%
 already at ONE thread — the deficit is predominantly load-independent
 per-hash execution cost, not cache capacity. Right-sizing the merge vectors
 (~1 MiB more) was skipped for the same reason; the cached-prefix retest
-condition (slices winning) was not met. The one untried memory lever left is
-2 MiB large pages, which targets TLB walk frequency rather than capacity —
-the mechanism Zig actually cites (Gracemont's 48-entry L1 DTLB) — and remains
-open.
+condition (slices winning) was not met.
+
+### 2 MiB large pages under the v114 scratch — measured, KEPT
+
+The capacity story being dead left TLB walk frequency — the mechanism the zig
+miner actually cites (Gracemont's 48-entry L1 DTLB) and the one deployment
+feature both faster siblings have that this miner lacked. `largePageAlloc`
+(`largepage_windows.go`) enables `SeLockMemoryPrivilege` best-effort, lets
+`VirtualAlloc(MEM_LARGE_PAGES)` adjudicate, and `newV114Scratch` carves its
+eight integer-only backing arrays out of the region (64-byte aligned; slice
+headers stay on the Go heap so the GC never sees the region; growth past a
+capacity falls back to an ordinary heap append; ordinary allocation on any
+failure). The sustained-bench summary line now prints `largepages=`.
+
+- micro couples ×20 vs the shared-scratch base: **-0.158%**, 95% CI
+  [-0.965%, +0.655%] — no 1T regression (one pinned thread barely exercises
+  the page walkers).
+- Thue-Morse 8-leg 240 s @ 20T vs the same base: median 24.7425 → **24.965
+  KH/s, +0.899%**, every rank-paired leg positive (+0.76%…+1.62%).
+
+Clears the relaxed retention gate at the 20T target with no demonstrated 1T
+regression. Combined with the scratch share, the kata lands ~+0.9% sustained
+and ~-53 MiB at 20 threads. Requires the "Lock pages in memory" user right;
+without it the binary silently runs exactly as before.
 
 ## Closed Questions
 
