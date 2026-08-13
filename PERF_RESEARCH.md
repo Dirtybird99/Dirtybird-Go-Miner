@@ -657,6 +657,40 @@ and variable-width copy branches. These results reinforce two host-specific
 rules: contiguous materialized positions beat deferred gathers, and compact
 assembly loops beat speculative unrolling.
 
+## 2026-08-13 working-set campaign (kata-5)
+
+Premise under test: the ~21% sustained gap to the Zig miner (24.79 vs 31.30
+KH/s at 20T×120s) is memory pressure — this miner carried ~6.28 MiB of hot
+scratch per thread (2× ScratchData + 2× v114Scratch) versus Zig's ~2.06 MiB,
+and Zig documents its lane-shared SA scratch as a measured working-set halving
+with a 12-16-thread break point.
+
+**Change: share one `v114Scratch` across the two x2 lanes** (`hasher.go`; the
+SA working scratch is lane-transient — every `buildSAv114` call rewrites it
+before reading, and lane B starts only after lane A's suffix array is fully in
+`sa_bytes`). Removes ~2.67 MiB/thread (~53 MiB at 20T). Also corrected the
+stale `Hasher` comment that claimed the per-lane duplication mirrored the zig
+miner — Zig duplicates Workers but SHARES its SA scratch.
+
+Measured (both instruments, gates green incl. the full astrobwt suite):
+- micro couples ×20 (`^BenchmarkHashPairV114$`, 600x, affinity 0x1):
+  **+0.810%**, 95% CI [-0.169%, +1.797%], one-sided lower **+0.001%**.
+- Thue-Morse 8-leg 240 s @ 20T: base median 24.7338, cand 24.7975 →
+  **+0.258%** — below the ~0.6% attribution floor.
+
+**Verdict: retained as a footprint/hygiene change, not a performance claim**
+(positive sign on both instruments, no regression indication, halves pair-mode
+scratch). **The working-set hypothesis for the Zig gap is REFUTED at this
+size scale**: cutting 2.67 MiB/thread moved 20T by ~0.26%. A fresh 1T x2
+datum (2.11 KH/s here vs ~2.56 derived for Zig) puts the gap at ~-17.6%
+already at ONE thread — the deficit is predominantly load-independent
+per-hash execution cost, not cache capacity. Right-sizing the merge vectors
+(~1 MiB more) was skipped for the same reason; the cached-prefix retest
+condition (slices winning) was not met. The one untried memory lever left is
+2 MiB large pages, which targets TLB walk frequency rather than capacity —
+the mechanism Zig actually cites (Gracemont's 48-entry L1 DTLB) — and remains
+open.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
