@@ -6,6 +6,7 @@ package fakegetwork
 import (
 	"encoding/hex"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,6 +195,53 @@ func TestNonSubmitFramesAreNotCounted(t *testing.T) {
 
 	if subs := srv.Submissions(); len(subs) != 1 {
 		t.Fatalf("Submissions = %+v, want only the real share", subs)
+	}
+}
+
+// TestCloseWaitsForHandlers pins the other half of the teardown: Close must
+// not return while a handler -- and therefore an OnSubmit callback -- is still
+// running, or the callback lands in a test that has already finished.
+func TestCloseWaitsForHandlers(t *testing.T) {
+	var once sync.Once
+	started := make(chan struct{})
+	var mu sync.Mutex
+	finished := false
+
+	srv := Start(Config{OnSubmit: func(Submission) {
+		once.Do(func() { close(started) })
+		time.Sleep(300 * time.Millisecond)
+		mu.Lock()
+		finished = true
+		mu.Unlock()
+	}})
+	defer srv.Close() // idempotent; the real Close is below
+
+	conn, _, err := websocket.DefaultDialer.Dial(srv.URL(), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	var frame getwork.Job
+	if err := conn.ReadJSON(&frame); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := conn.WriteJSON(getwork.Submit{JobID: "job-0", Blob: "deadbeef"}); err != nil {
+		t.Fatalf("write submit: %v", err)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnSubmit never fired")
+	}
+
+	srv.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !finished {
+		t.Fatal("Close returned while a handler was still running")
 	}
 }
 

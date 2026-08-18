@@ -95,6 +95,7 @@ type Server struct {
 	submissions []Submission
 	conns       map[*websocket.Conn]struct{}
 	closed      bool
+	handlers    sync.WaitGroup
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -117,10 +118,12 @@ func (s *Server) Addr() string { return s.srv.Listener.Addr().String() }
 // URL returns the "ws://host:port" dial URL.
 func (s *Server) URL() string { return "ws://" + s.Addr() }
 
-// Close shuts the server down and closes every upgraded connection, so no
-// handler keeps pushing jobs at a client after the call returns. httptest
-// forgets hijacked connections, and would otherwise leave the handler and its
-// reader running. Safe to call more than once.
+// Close shuts the server down, closes every upgraded connection, and waits
+// for the handlers to finish. httptest forgets hijacked connections, so
+// without this a handler could still be pushing jobs -- or invoking OnSubmit
+// -- after Close returned, which lands in a test that has already finished.
+// Like httptest.Server.Close it blocks until the handlers return, so an
+// OnSubmit that never returns will hang it. Safe to call more than once.
 func (s *Server) Close() {
 	s.mu.Lock()
 	s.closed = true
@@ -134,6 +137,7 @@ func (s *Server) Close() {
 	for _, c := range conns {
 		c.Close()
 	}
+	s.handlers.Wait()
 	s.srv.Close()
 }
 
@@ -149,6 +153,9 @@ func (s *Server) track(conn *websocket.Conn) bool {
 		s.conns = make(map[*websocket.Conn]struct{})
 	}
 	s.conns[conn] = struct{}{}
+	// Counted under the same lock that guards closed, so Close cannot start
+	// waiting between the check and the Add.
+	s.handlers.Add(1)
 	return true
 }
 
@@ -156,6 +163,7 @@ func (s *Server) untrack(conn *websocket.Conn) {
 	s.mu.Lock()
 	delete(s.conns, conn)
 	s.mu.Unlock()
+	s.handlers.Done()
 }
 
 // Submissions returns every submission received so far, in order.
@@ -223,6 +231,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			s.addSubmission(Submission{JobID: sub.JobID, Blob: sub.Blob})
 		}
 	}()
+
+	// The reader calls OnSubmit, so the handler is not done until it is.
+	defer func() { conn.Close(); <-readerDone }()
 
 	pass := s.jobs
 	if len(pass) == 0 {

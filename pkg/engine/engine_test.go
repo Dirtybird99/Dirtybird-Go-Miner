@@ -47,9 +47,21 @@ func (l *logSink) lines() []string {
 	return append([]string(nil), l.msgs...)
 }
 
+func (l *logSink) count(substr string) int {
+	n := 0
+	for _, m := range l.lines() {
+		if strings.Contains(m, substr) {
+			n++
+		}
+	}
+	return n
+}
+
 // stoppedWorkerResidual is comfortably more than the pending hashes a worker
-// can flush on its way out of the grind loop, so growth past it means the
-// worker is still mining rather than winding down.
+// can flush on its way out of the grind loop (under counterFlush = 16 each),
+// so growth past it means the worker is still mining rather than winding
+// down. It is sized for the single-threaded engines the tests below start; a
+// test with more than four workers would need to scale it.
 const stoppedWorkerResidual = 64
 
 // waitForStats polls until ok reports true, and fails the test if it never does.
@@ -189,8 +201,14 @@ func TestStartStopConnectsAndStats(t *testing.T) {
 	}
 
 	// Running is derived from the goroutines, not hardcoded.
-	if e.Stats().Running {
+	after := e.Stats()
+	if after.Running {
 		t.Fatal("Running = true after Stop, want false")
+	}
+	// Nothing advances the window once the sampler is gone, so a nonzero
+	// figure here is a stale average decaying as 1/t, not a measurement.
+	if after.Hashrate != 0 {
+		t.Fatalf("Hashrate = %v after Stop, want 0", after.Hashrate)
 	}
 
 	// Stop is idempotent.
@@ -265,6 +283,138 @@ func TestPairHonorsAnExplicitOverride(t *testing.T) {
 	}
 	if got := (&Engine{cfg: Config{}}).pair(); got != DefaultPair() {
 		t.Fatalf("pair() = %v for Pair=nil, want DefaultPair() = %v", got, DefaultPair())
+	}
+}
+
+// TestThrottledSuppressesRepeats covers the helper the rejection logging
+// leans on. The CLI's twin is tested the same way in main_test.go; the copy
+// in this package had no test of its own, so it could drift unnoticed.
+func TestThrottledSuppressesRepeats(t *testing.T) {
+	var got []string
+	sink := func(level, format string, args ...interface{}) {
+		got = append(got, fmt.Sprintf(format, args...))
+	}
+	th := throttled(time.Minute, sink)
+
+	th("WARN", "same %d", 1)
+	th("WARN", "same %d", 1)
+	th("WARN", "same %d", 1)
+	if len(got) != 1 {
+		t.Fatalf("emitted %d lines for three identical messages, want 1: %v", len(got), got)
+	}
+	if got[0] != "same 1" {
+		t.Fatalf("first line = %q, want %q", got[0], "same 1")
+	}
+
+	// A changed message goes out at once, carrying what was swallowed.
+	th("WARN", "different")
+	if len(got) != 2 {
+		t.Fatalf("a changed message was suppressed: %v", got)
+	}
+	if !strings.Contains(got[1], "2 repeats suppressed") {
+		t.Fatalf("second line = %q, want the suppressed count", got[1])
+	}
+
+	// A zero interval throttles nothing.
+	got = nil
+	nth := throttled(0, sink)
+	nth("WARN", "x")
+	nth("WARN", "x")
+	if len(got) != 2 {
+		t.Fatalf("interval 0 suppressed a message: %v", got)
+	}
+}
+
+// TestRejectedPushesAreThrottled is the engine-level half: a daemon that keeps
+// pushing keepalive frames must not put one line per frame into the host's log
+// sink. Without the throttle this test sees three.
+func TestRejectedPushesAreThrottled(t *testing.T) {
+	srv := fakegetwork.Start(fakegetwork.Config{
+		Jobs: []fakegetwork.Job{
+			fakegetwork.ValidJob("job-0", 1000),
+			{JobID: "ka"},
+			{JobID: "ka"},
+			{JobID: "ka"},
+			fakegetwork.ValidJob("job-1", 1001),
+		},
+		PushInterval: 50 * time.Millisecond,
+	})
+	defer srv.Close()
+
+	sink := newLogSink("ignored non-job frame")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	e, err := Start(ctx, Config{
+		Endpoint: srv.URL(),
+		Wallet:   "dero1qytest",
+		Threads:  1,
+		Logf:     sink.logf,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer e.Stop()
+
+	// Reaching job-1 proves all three keepalives were consumed.
+	waitForStats(t, e, 20*time.Second, "the job behind the keepalives",
+		func(s Stats) bool { return s.Height == 1001 })
+
+	if n := sink.count("ignored non-job frame"); n != 1 {
+		t.Fatalf("logged %d rejection lines for 3 identical keepalives, want 1: %v", n, sink.lines())
+	}
+}
+
+// badVersionJob is a well-formed 48-byte frame whose miniblock version nibble
+// is not 1. That is the one rejection meaning "this miner cannot mine the
+// current chain" rather than "that was a keepalive", so it takes the other
+// branch of onJob.
+func badVersionJob(id string, height uint64) fakegetwork.Job {
+	blob := []byte(fakegetwork.ValidBlob())
+	blob[1] = '2' // low nibble of byte 0: version 1 -> 2
+	return fakegetwork.Job{
+		JobID:            id,
+		BlockhashingBlob: string(blob),
+		Difficulty:       1000,
+		Height:           height,
+	}
+}
+
+// TestBadVersionPushesAreThrottled covers the sibling branch. The CLI hands
+// one throttled logger to handleRejectedPush and so throttles both messages;
+// throttling only the keepalive warning would leave a version-bumped daemon
+// free to flood the error path at job cadence.
+func TestBadVersionPushesAreThrottled(t *testing.T) {
+	srv := fakegetwork.Start(fakegetwork.Config{
+		Jobs: []fakegetwork.Job{
+			badVersionJob("bad-0", 900),
+			badVersionJob("bad-1", 901),
+			badVersionJob("bad-2", 902),
+			fakegetwork.ValidJob("job-1", 1001),
+		},
+		PushInterval: 50 * time.Millisecond,
+	})
+	defer srv.Close()
+
+	sink := newLogSink("rejected job push")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	e, err := Start(ctx, Config{
+		Endpoint: srv.URL(),
+		Wallet:   "dero1qytest",
+		Threads:  1,
+		Logf:     sink.logf,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer e.Stop()
+
+	// Reaching the valid job behind them proves all three were consumed.
+	waitForStats(t, e, 20*time.Second, "the job behind the bad-version pushes",
+		func(s Stats) bool { return s.Height == 1001 })
+
+	if n := sink.count("rejected job push"); n != 1 {
+		t.Fatalf("logged %d error lines for 3 identical bad-version pushes, want 1: %v", n, sink.lines())
 	}
 }
 

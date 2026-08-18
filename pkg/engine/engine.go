@@ -31,9 +31,10 @@ const (
 	// submitBuffer is how many found shares may queue before workers drop
 	// rather than stall the hot loop (family convention).
 	submitBuffer = 16
-	// rejectLogInterval throttles the "ignored non-job frame" warning. A
-	// daemon pushing keepalive/status frames at ~500ms would otherwise emit
-	// two warnings a second for the lifetime of the process.
+	// rejectLogInterval throttles the rejected-push messages. A daemon
+	// pushing keepalive/status frames at ~500ms would otherwise emit two
+	// lines a second for the lifetime of the process, and a daemon past a
+	// version bump does the same on the error path.
 	rejectLogInterval = 30 * time.Second
 )
 
@@ -149,8 +150,10 @@ type Engine struct {
 	rate *hashrateWindow
 	mu   sync.Mutex // guards the rate window and the counter sampled into it
 
-	// rejectLog throttles the non-job-frame warning. The client calls OnJob
-	// from its single reader goroutine, so it needs no lock of its own.
+	// rejectLog throttles both rejection messages, through one closure, the
+	// way the CLI hands a single throttled logger to handleRejectedPush. The
+	// client calls OnJob from its single reader goroutine, so it needs no
+	// lock of its own.
 	rejectLog func(level, format string, args ...interface{})
 }
 
@@ -227,12 +230,13 @@ func Start(ctx context.Context, cfg Config) (*Engine, error) {
 	if cfg.Pin {
 		pinOrder = miner.PinOrder()
 	}
+	pair := e.pair() // resolved here: cfg.Pair points at the caller's memory
 	for t := 0; t < cfg.Threads; t++ {
 		t := t
 		e.wg.Add(1)
 		go func() {
 			defer e.wg.Done()
-			miner.Run(ctx, t, e.state, e.submits, pinOrder, backend, e.pair())
+			miner.Run(ctx, t, e.state, e.submits, pinOrder, backend, pair)
 		}()
 	}
 
@@ -267,7 +271,7 @@ func (e *Engine) onJob(j getwork.Job) bool {
 	if err != nil {
 		if errors.Is(err, miner.ErrBadVersion) {
 			e.state.Invalidate()
-			e.logf("ERROR", "rejected job push: %v", err)
+			e.rejectLog("ERROR", "rejected job push: %v", err)
 		} else {
 			e.rejectLog("WARN", "ignored non-job frame: %v", err)
 		}
@@ -291,12 +295,18 @@ func (e *Engine) Stop() {
 // render cadence without shortening the window or perturbing the rate.
 func (e *Engine) Stats() Stats {
 	now := time.Now()
+	running := e.running()
 	e.mu.Lock()
 	hashes := e.state.TotalHashes.Load()
 	rate := e.rate.rate(now, hashes)
 	e.mu.Unlock()
+	if !running {
+		// Nothing advances the window any more, so the figure would decay as
+		// 1/t off a frozen counter rather than fall to zero.
+		rate = 0
+	}
 	return Stats{
-		Running:    e.running(),
+		Running:    running,
 		Connected:  e.client.Connected.Load(),
 		Hashrate:   rate,
 		Hashes:     hashes,
