@@ -258,15 +258,25 @@ func TestStatsPollingDoesNotDisturbHashrate(t *testing.T) {
 	base := waitForStats(t, e, 20*time.Second, "a nonzero hashrate",
 		func(s Stats) bool { return s.Hashrate > 0 }).Hashrate
 
-	// Hammer the readout the way a 60fps UI would.
+	// Hammer the readout the way a 60fps UI would, and compare the burst
+	// readings against each other rather than against base: the burst spans
+	// well under a millisecond at any miner speed, so a window nothing
+	// perturbs cannot drift across it. Spread here is the polling itself.
+	var lo, hi float64
 	for i := 0; i < 200; i++ {
 		got := e.Stats().Hashrate
 		if got <= 0 {
 			t.Fatalf("Hashrate = %v on poll %d (baseline %v); polling collapsed the window", got, i, base)
 		}
-		if got > base*100 {
-			t.Fatalf("Hashrate = %v on poll %d (baseline %v); polling shortened the window into a spike", got, i, base)
+		if i == 0 || got < lo {
+			lo = got
 		}
+		if i == 0 || got > hi {
+			hi = got
+		}
+	}
+	if hi > lo*2 {
+		t.Fatalf("Hashrate ranged over [%v, %v] across 200 polls (baseline %v); polling perturbed the window", lo, hi, base)
 	}
 }
 
@@ -450,14 +460,17 @@ func TestKeepaliveFrameDoesNotKillMining(t *testing.T) {
 	}
 	defer e.Stop()
 
-	waitForStats(t, e, 15*time.Second, "job-0 to be mining",
+	// Budget: the ceilings below must sum to less than the client's 20s read
+	// timeout, after which it redials and the server pushes job-0 again --
+	// which would satisfy the growth check without job-0 having survived.
+	waitForStats(t, e, 8*time.Second, "job-0 to be mining",
 		func(s Stats) bool { return s.Connected && s.Height == 1000 && s.Hashes > 0 })
 
 	// The old version asserted before the keepalive was ever sent; wait for
 	// onJob to have actually rejected it.
 	select {
 	case <-sink.hit:
-	case <-time.After(15 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatalf("keepalive frame never reached onJob; log = %v", sink.lines())
 	}
 
@@ -466,8 +479,8 @@ func TestKeepaliveFrameDoesNotKillMining(t *testing.T) {
 	// inguishable from mining if the bar is "the counter moved at all".
 	// Demand two rounds of growth well past that residual.
 	before := e.Stats().Hashes
-	mid := waitForStats(t, e, 15*time.Second, "hashing to continue past the keepalive",
+	mid := waitForStats(t, e, 3*time.Second, "hashing to continue past the keepalive",
 		func(s Stats) bool { return s.Hashes > before+stoppedWorkerResidual })
-	waitForStats(t, e, 15*time.Second, "hashing to still be going a round later",
+	waitForStats(t, e, 3*time.Second, "hashing to still be going a round later",
 		func(s Stats) bool { return s.Hashes > mid.Hashes+stoppedWorkerResidual })
 }
