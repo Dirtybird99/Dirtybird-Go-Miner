@@ -483,4 +483,15 @@ func TestKeepaliveFrameDoesNotKillMining(t *testing.T) {
 		func(s Stats) bool { return s.Hashes > before+stoppedWorkerResidual })
 	waitForStats(t, e, 3*time.Second, "hashing to still be going a round later",
 		func(s Stats) bool { return s.Hashes > mid.Hashes+stoppedWorkerResidual })
+
+	// The budget above is the only thing keeping the read timeout from firing,
+	// and it leaves one second of margin. A redial replays job-0 and would
+	// satisfy both growth checks without job-0 having survived the keepalive at
+	// all, so pin the session count instead of trusting the arithmetic: the
+	// client logs one "Connected (host) (n ms)" per established session, and
+	// "Connecting (" does not match it.
+	if n := sink.count("Connected ("); n != 1 {
+		t.Fatalf("client established %d sessions, want 1; a redial replayed job-0 and masked the check: %v",
+			n, sink.lines())
+	}
 }

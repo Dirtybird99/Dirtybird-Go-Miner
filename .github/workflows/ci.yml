@@ -77,7 +77,7 @@ jobs:
       # never even compiled — a missing import shipped unnoticed once.
       - name: Big-endian compile gate (s390x)
         if: matrix.os == 'ubuntu-latest'
-        run: GOOS=linux GOARCH=s390x go build ./internal/... .
+        run: GOOS=linux GOARCH=s390x go build ./internal/... ./pkg/... .
       - name: Stage-stats accounting
         if: matrix.os == 'ubuntu-latest'
         run: go test -tags stagestats ./internal/astrobwt -run '^TestStageStats' -count=1

@@ -10,6 +10,13 @@
 // process (a wallet GUI/TUI), where a 2 GiB heap cap would fight the host
 // application. Callers wanting the CLI's steady-state behavior should keep
 // running go-miner as a binary instead.
+//
+// The module path is "go-miner", not a URL, so it cannot be resolved through
+// the module proxy. A host module points at a checkout instead:
+//
+//	require go-miner v0.0.0
+//
+//	replace go-miner => ../Dirtybird-Go-Miner
 package engine
 
 import (
@@ -59,9 +66,7 @@ const DefaultBackendName = "v114"
 
 func (c Config) backend() (astrobwt.Backend, error) {
 	switch c.Backend {
-	case "":
-		return astrobwt.BackendV114, nil
-	case "v114":
+	case "", DefaultBackendName:
 		return astrobwt.BackendV114, nil
 	case "sais":
 		return astrobwt.BackendSAIS, nil
