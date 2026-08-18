@@ -25,16 +25,16 @@ import (
 	"go-miner/internal/miner"
 )
 
-// Version is the go-miner release this engine was built from. Bump it when
-// upstream tags a new release.
-const Version = "0.2.18"
-
 const (
 	// MaxThreads caps the worker count: the thread id lives in nonce byte 47.
 	MaxThreads = 255
 	// submitBuffer is how many found shares may queue before workers drop
 	// rather than stall the hot loop (family convention).
 	submitBuffer = 16
+	// rejectLogInterval throttles the "ignored non-job frame" warning. A
+	// daemon pushing keepalive/status frames at ~500ms would otherwise emit
+	// two warnings a second for the lifetime of the process.
+	rejectLogInterval = 30 * time.Second
 )
 
 // ErrBrokenHash is returned by Start when the AstroBWTv3 pow("a") known
@@ -96,9 +96,10 @@ type Config struct {
 	// Threads is the worker count; 0 = logical CPU count, capped at
 	// MaxThreads. Thread id lives in nonce byte 47 (max 255).
 	Threads int
-	// Pair enables the 2-way batched final hash (2 nonces/thread). Defaults
-	// to DefaultPair() when zero-valued.
-	Pair bool
+	// Pair enables the 2-way batched final hash (2 nonces/thread). A nil
+	// pointer takes DefaultPair(); a non-nil one is honored either way, so a
+	// host can turn pairing off on arm64 the way the CLI's -pair=false does.
+	Pair *bool
 	// Pin enables P-core-first thread pinning where supported (Windows amd64
 	// <= 64 logical CPUs in v1; a no-op elsewhere).
 	Pin bool
@@ -109,7 +110,9 @@ type Config struct {
 	// Debug enables per-job / per-share logging chatter through Logf.
 	Debug bool
 	// Logf receives leveled log lines ("INFO"/"ERROR"/"DEBUG"/"WARN").
-	// May be nil; messages are dropped then.
+	// May be nil; messages are dropped then. It is called from the getwork
+	// client's reader and writer goroutines as well as the caller's, so an
+	// implementation that touches shared state must do its own locking.
 	Logf func(level, format string, args ...interface{})
 }
 
@@ -144,7 +147,11 @@ type Engine struct {
 	wg     sync.WaitGroup
 
 	rate *hashrateWindow
-	mu   sync.Mutex // guards the rate window against Stats/ sampler
+	mu   sync.Mutex // guards the rate window and the counter sampled into it
+
+	// rejectLog throttles the non-job-frame warning. The client calls OnJob
+	// from its single reader goroutine, so it needs no lock of its own.
+	rejectLog func(level, format string, args ...interface{})
 }
 
 func (e *Engine) logf(level, format string, args ...interface{}) {
@@ -154,12 +161,9 @@ func (e *Engine) logf(level, format string, args ...interface{}) {
 }
 
 func (e *Engine) pair() bool {
-	if e.cfg.Pair {
-		return true
+	if e.cfg.Pair != nil {
+		return *e.cfg.Pair
 	}
-	// cfg.Pair is a plain bool; DefaultPair() only when it was left off AND
-	// the platform default wants it. A caller disabling pair on arm64 cannot
-	// be distinguished here, so the CLI-level override stays a CLI concern.
 	return DefaultPair()
 }
 
@@ -195,6 +199,7 @@ func Start(ctx context.Context, cfg Config) (*Engine, error) {
 		done:    make(chan struct{}),
 		rate:    newHashrateWindow(time.Now(), 0),
 	}
+	e.rejectLog = throttled(rejectLogInterval, e.logf)
 
 	e.client = &getwork.Client{
 		Endpoint:     cfg.Endpoint,
@@ -236,7 +241,11 @@ func Start(ctx context.Context, cfg Config) (*Engine, error) {
 		defer e.wg.Done()
 		e.client.Run(ctx)
 	}()
-	go e.sampleLoop(ctx)
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		e.sampleLoop(ctx)
+	}()
 
 	go func() {
 		e.wg.Wait()
@@ -260,7 +269,7 @@ func (e *Engine) onJob(j getwork.Job) bool {
 			e.state.Invalidate()
 			e.logf("ERROR", "rejected job push: %v", err)
 		} else {
-			e.logf("WARN", "ignored non-job frame: %v", err)
+			e.rejectLog("WARN", "ignored non-job frame: %v", err)
 		}
 		return false
 	}
@@ -277,15 +286,17 @@ func (e *Engine) Stop() {
 	<-e.done
 }
 
-// Stats returns an atomic snapshot of engine activity.
+// Stats returns an atomic snapshot of engine activity. It is a pure read:
+// only sampleLoop advances the hashrate window, so a host may poll Stats at
+// render cadence without shortening the window or perturbing the rate.
 func (e *Engine) Stats() Stats {
 	now := time.Now()
-	hashes := e.state.TotalHashes.Load()
 	e.mu.Lock()
-	rate := e.rate.sample(now, hashes)
+	hashes := e.state.TotalHashes.Load()
+	rate := e.rate.rate(now, hashes)
 	e.mu.Unlock()
 	return Stats{
-		Running:    true,
+		Running:    e.running(),
 		Connected:  e.client.Connected.Load(),
 		Hashrate:   rate,
 		Hashes:     hashes,
@@ -297,6 +308,18 @@ func (e *Engine) Stats() Stats {
 		Endpoint:   e.client.HostPort(),
 		Wallet:     e.cfg.Wallet,
 		Threads:    e.cfg.Threads,
+	}
+}
+
+// running reports whether the engine still has goroutines up: done is closed
+// exactly when the client, the workers and the sampler have all returned, so
+// this is false after Stop and for a Start whose context was already dead.
+func (e *Engine) running() bool {
+	select {
+	case <-e.done:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -322,12 +345,12 @@ func (e *Engine) sampleLoop(ctx context.Context) {
 var katHash = "54e2324ddacc3f0383501a9e5760f85d63e9bc6705e9124ca7aef89016ab81ea"
 
 // hashrateWindow is a ring of timestamped hash counters (main.go's window,
-// simplified). sample records a point and returns H/s measured across the
-// ring slot it overwrote, so the readout is a ~10s sliding average.
+// simplified). Writing and reading are separate: sample records a point at a
+// fixed 1Hz, and rate measures across the oldest point still in the ring, so
+// the readout is a ~10s sliding average no matter how often it is read.
 type hashrateWindow struct {
 	points [10]hashratePoint
 	next   int
-	start  hashratePoint
 }
 
 type hashratePoint struct {
@@ -337,20 +360,51 @@ type hashratePoint struct {
 
 func newHashrateWindow(at time.Time, hashes uint64) *hashrateWindow {
 	start := hashratePoint{at: at, hashes: hashes}
-	w := &hashrateWindow{start: start}
+	w := &hashrateWindow{}
 	for i := range w.points {
 		w.points[i] = start
 	}
 	return w
 }
 
-func (w *hashrateWindow) sample(at time.Time, hashes uint64) float64 {
-	cur := hashratePoint{at: at, hashes: hashes}
-	old := w.points[w.next]
-	w.points[w.next] = cur
+// sample records a point, overwriting the oldest. Only the 1Hz sampler may
+// call it: an extra write shortens the window every reader shares.
+func (w *hashrateWindow) sample(at time.Time, hashes uint64) {
+	w.points[w.next] = hashratePoint{at: at, hashes: hashes}
 	w.next = (w.next + 1) % len(w.points)
-	if cur.hashes < old.hashes || cur.at.Sub(old.at) <= 0 {
+}
+
+// rate reports H/s between the oldest recorded point -- the slot sample would
+// overwrite next -- and the counter handed in, without recording anything.
+func (w *hashrateWindow) rate(at time.Time, hashes uint64) float64 {
+	old := w.points[w.next]
+	elapsed := at.Sub(old.at)
+	if hashes < old.hashes || elapsed <= 0 {
 		return 0
 	}
-	return float64(cur.hashes-old.hashes) / cur.at.Sub(old.at).Seconds()
+	return float64(hashes-old.hashes) / elapsed.Seconds()
+}
+
+// throttled wraps logf so a message repeating at job cadence cannot flood the
+// host's log sink: a changed message goes out immediately, an unchanged one at
+// most once per interval, with the suppressed count appended. Mirrors the
+// CLI's throttle, and like it is not safe for concurrent use.
+func throttled(interval time.Duration, logf func(level, format string, args ...interface{})) func(level, format string, args ...interface{}) {
+	var lastMsg string
+	var lastAt time.Time
+	var suppressed int
+	return func(level, format string, args ...interface{}) {
+		msg := fmt.Sprintf(format, args...)
+		now := time.Now()
+		if msg == lastMsg && now.Sub(lastAt) < interval {
+			suppressed++
+			return
+		}
+		if suppressed > 0 {
+			logf(level, "%s (%d repeats suppressed)", msg, suppressed)
+		} else {
+			logf(level, "%s", msg)
+		}
+		lastMsg, lastAt, suppressed = msg, now, 0
+	}
 }

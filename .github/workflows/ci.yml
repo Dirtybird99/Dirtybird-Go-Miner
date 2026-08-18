@@ -87,7 +87,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/analyze-thue-morse.py --selftest
       - name: Race
-        run: go test -race -count=1 -timeout=30m ./internal/...
+        run: go test -race -count=1 -timeout=30m ./...
       - name: Shell hygiene
         if: runner.os == 'Linux'
         shell: bash

@@ -6,12 +6,65 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"go-miner/pkg/fakegetwork"
 )
+
+// logSink captures engine log lines and signals when one containing want
+// arrives. The engine calls Logf from the getwork client's reader and writer
+// goroutines as well as the caller's, so the mutex is load-bearing under -race.
+type logSink struct {
+	mu   sync.Mutex
+	msgs []string
+	want string
+	hit  chan struct{}
+	done bool
+}
+
+func newLogSink(want string) *logSink {
+	return &logSink{want: want, hit: make(chan struct{})}
+}
+
+func (l *logSink) logf(level, format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.msgs = append(l.msgs, level+" "+msg)
+	if !l.done && strings.Contains(msg, l.want) {
+		l.done = true
+		close(l.hit)
+	}
+}
+
+func (l *logSink) lines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.msgs...)
+}
+
+// stoppedWorkerResidual is comfortably more than the pending hashes a worker
+// can flush on its way out of the grind loop, so growth past it means the
+// worker is still mining rather than winding down.
+const stoppedWorkerResidual = 64
+
+// waitForStats polls until ok reports true, and fails the test if it never does.
+func waitForStats(t *testing.T, e *Engine, within time.Duration, what string, ok func(Stats) bool) Stats {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if s := e.Stats(); ok(s) {
+			return s
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s; last stats = %+v", within, what, e.Stats())
+	return Stats{}
+}
 
 func TestStartRejectsBadConfig(t *testing.T) {
 	cases := []struct {
@@ -100,17 +153,11 @@ func TestStartStopConnectsAndStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	defer e.Stop() // an early t.Fatal must not leak a live client
 
 	// Wait until a job is installed and hashing starts.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		s := e.Stats()
-		if s.Connected && s.Height >= 1000 && s.Hashes > 0 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	st := e.Stats()
+	st := waitForStats(t, e, 10*time.Second, "a connected engine hashing job-0",
+		func(s Stats) bool { return s.Connected && s.Height >= 1000 && s.Hashes > 0 })
 	if !st.Connected {
 		t.Fatal("client never connected")
 	}
@@ -141,25 +188,44 @@ func TestStartStopConnectsAndStats(t *testing.T) {
 		t.Fatal("Stop did not return within 5s")
 	}
 
+	// Running is derived from the goroutines, not hardcoded.
+	if e.Stats().Running {
+		t.Fatal("Running = true after Stop, want false")
+	}
+
 	// Stop is idempotent.
 	e.Stop()
 }
 
-// TestKeepaliveFrameDoesNotKillMining pins the CLI rejection policy: a
-// non-version rejection (short blob / empty jobid) is a keepalive/status
-// frame and must NOT invalidate the last good job.
-func TestKeepaliveFrameDoesNotKillMining(t *testing.T) {
-	srv := fakegetwork.Start(fakegetwork.Config{
-		Jobs: []fakegetwork.Job{
-			fakegetwork.ValidJob("job-0", 1000),
-			{JobID: "ka"}, // keepalive frame with no blob
-			fakegetwork.ValidJob("job-1", 1001),
-		},
-		PushInterval: 1 * time.Second,
+// TestStartWithDeadContextIsNotRunning covers the other way Running can lie:
+// Start on an already-cancelled context returns a non-nil engine and a nil
+// error while every goroutine exits at once.
+func TestStartWithDeadContextIsNotRunning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	e, err := Start(ctx, Config{
+		Endpoint: "localhost:10100",
+		Wallet:   "dero1qytest",
+		Threads:  1,
 	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer e.Stop()
+	waitForStats(t, e, 5*time.Second, "Running to report false",
+		func(s Stats) bool { return !s.Running })
+}
+
+// TestStatsPollingDoesNotDisturbHashrate is the regression test for Stats
+// mutating the window it reads. A host polling at render cadence used to
+// overwrite every ring slot with near-identical timestamps, after which the
+// readout collapsed to 0 -- or spiked absurdly when a worker flush landed
+// between two microsecond-apart slots.
+func TestStatsPollingDoesNotDisturbHashrate(t *testing.T) {
+	srv := fakegetwork.Start(fakegetwork.Config{})
 	defer srv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	e, err := Start(ctx, Config{
 		Endpoint: srv.URL(),
@@ -169,18 +235,89 @@ func TestKeepaliveFrameDoesNotKillMining(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	defer e.Stop()
 
-	// After the keepalive, hashing must continue (job-0 still active).
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		s := e.Stats()
-		if s.Connected && s.Hashes > 10 {
-			break
+	base := waitForStats(t, e, 20*time.Second, "a nonzero hashrate",
+		func(s Stats) bool { return s.Hashrate > 0 }).Hashrate
+
+	// Hammer the readout the way a 60fps UI would.
+	for i := 0; i < 200; i++ {
+		got := e.Stats().Hashrate
+		if got <= 0 {
+			t.Fatalf("Hashrate = %v on poll %d (baseline %v); polling collapsed the window", got, i, base)
 		}
-		time.Sleep(50 * time.Millisecond)
+		if got > base*100 {
+			t.Fatalf("Hashrate = %v on poll %d (baseline %v); polling shortened the window into a spike", got, i, base)
+		}
 	}
-	if got := e.Stats().Hashes; got == 0 {
-		t.Fatal("mining stopped after a keepalive frame; want last job to stay active")
+}
+
+// TestPairHonorsAnExplicitOverride pins the tri-state: nil takes the platform
+// default, and a non-nil false really disables pairing. A plain bool could not
+// express that on arm64, so a host could not reproduce the CLI's -pair=false.
+func TestPairHonorsAnExplicitOverride(t *testing.T) {
+	off, on := false, true
+	if got := (&Engine{cfg: Config{Pair: &off}}).pair(); got {
+		t.Fatal("pair() = true for Pair=&false, want false")
 	}
-	e.Stop()
+	if got := (&Engine{cfg: Config{Pair: &on}}).pair(); !got {
+		t.Fatal("pair() = false for Pair=&true, want true")
+	}
+	if got := (&Engine{cfg: Config{}}).pair(); got != DefaultPair() {
+		t.Fatalf("pair() = %v for Pair=nil, want DefaultPair() = %v", got, DefaultPair())
+	}
+}
+
+// TestKeepaliveFrameDoesNotKillMining pins the CLI rejection policy: a
+// non-version rejection (short blob / empty jobid) is a keepalive/status
+// frame and must NOT invalidate the last good job.
+//
+// The keepalive is the LAST frame on purpose. With a valid job behind it, a
+// regression that invalidated on every rejection would be masked -- the next
+// job simply revives the state and hashing resumes. Here nothing follows, so
+// only the surviving job-0 can advance the counter.
+func TestKeepaliveFrameDoesNotKillMining(t *testing.T) {
+	srv := fakegetwork.Start(fakegetwork.Config{
+		Jobs: []fakegetwork.Job{
+			fakegetwork.ValidJob("job-0", 1000),
+			{JobID: "ka"}, // keepalive frame with no blob
+		},
+		PushInterval: 100 * time.Millisecond,
+	})
+	defer srv.Close()
+
+	sink := newLogSink("ignored non-job frame")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	e, err := Start(ctx, Config{
+		Endpoint: srv.URL(),
+		Wallet:   "dero1qytest",
+		Threads:  1,
+		Logf:     sink.logf,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer e.Stop()
+
+	waitForStats(t, e, 15*time.Second, "job-0 to be mining",
+		func(s Stats) bool { return s.Connected && s.Height == 1000 && s.Hashes > 0 })
+
+	// The old version asserted before the keepalive was ever sent; wait for
+	// onJob to have actually rejected it.
+	select {
+	case <-sink.hit:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("keepalive frame never reached onJob; log = %v", sink.lines())
+	}
+
+	// A single tick of growth is not enough: a worker that has just been
+	// stopped still flushes its handful of pending hashes, which is indist-
+	// inguishable from mining if the bar is "the counter moved at all".
+	// Demand two rounds of growth well past that residual.
+	before := e.Stats().Hashes
+	mid := waitForStats(t, e, 15*time.Second, "hashing to continue past the keepalive",
+		func(s Stats) bool { return s.Hashes > before+stoppedWorkerResidual })
+	waitForStats(t, e, 15*time.Second, "hashing to still be going a round later",
+		func(s Stats) bool { return s.Hashes > mid.Hashes+stoppedWorkerResidual })
 }

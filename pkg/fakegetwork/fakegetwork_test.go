@@ -125,3 +125,109 @@ func TestServerURLShape(t *testing.T) {
 		t.Fatalf("URL() and Addr() disagree: %q vs %q", srv.URL(), srv.Addr())
 	}
 }
+
+// TestZeroDifficultyReachesTheWire pins the "frames pass through unvalidated"
+// contract. Rewriting a zero difficulty to 1000 would hand the client a job
+// the caller meant it to reject, making the miner.ErrBadDiff path untestable.
+func TestZeroDifficultyReachesTheWire(t *testing.T) {
+	srv := Start(Config{Jobs: []Job{{JobID: "d0", BlockhashingBlob: validBlobHex}}})
+	defer srv.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(srv.URL(), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	var frame getwork.Job
+	if err := conn.ReadJSON(&frame); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if frame.Difficultyuint64 != 0 {
+		t.Fatalf("Difficultyuint64 = %d, want 0 (passed through, not defaulted)", frame.Difficultyuint64)
+	}
+	if frame.Difficulty != "0" {
+		t.Fatalf("Difficulty = %q, want \"0\"", frame.Difficulty)
+	}
+}
+
+// TestNonSubmitFramesAreNotCounted keeps the submission count honest: any JSON
+// object decodes into a Submit with zeroed fields, so a stray frame would
+// otherwise be recorded as a share.
+func TestNonSubmitFramesAreNotCounted(t *testing.T) {
+	onSubmitCh := make(chan Submission, 4)
+	srv := Start(Config{OnSubmit: func(s Submission) { onSubmitCh <- s }})
+	defer srv.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(srv.URL(), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	var frame getwork.Job
+	if err := conn.ReadJSON(&frame); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// Neither of these is a share: one has no fields in common with Submit,
+	// the other carries a job id but no blob.
+	if err := conn.WriteJSON(map[string]string{"status": "keepalive"}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+	if err := conn.WriteJSON(getwork.Submit{JobID: "job-0"}); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+	// A real share behind them: once it lands, the two above have been read.
+	if err := conn.WriteJSON(getwork.Submit{JobID: "job-0", Blob: "deadbeef"}); err != nil {
+		t.Fatalf("write submit: %v", err)
+	}
+
+	select {
+	case got := <-onSubmitCh:
+		if got.JobID != "job-0" || got.Blob != "deadbeef" {
+			t.Fatalf("first OnSubmit = %+v, want the real share; a non-share was counted", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnSubmit never fired")
+	}
+
+	if subs := srv.Submissions(); len(subs) != 1 {
+		t.Fatalf("Submissions = %+v, want only the real share", subs)
+	}
+}
+
+// TestCloseHangsUpLiveConnections covers the leak: httptest forgets hijacked
+// connections, so without explicit teardown the handler keeps pushing jobs at
+// a client that has already been "closed", and it plus its reader stay alive.
+func TestCloseHangsUpLiveConnections(t *testing.T) {
+	srv := Start(Config{JobEvery: 20 * time.Millisecond})
+	defer srv.Close() // idempotent; the real Close is below
+
+	conn, _, err := websocket.DefaultDialer.Dial(srv.URL(), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	var frame getwork.Job
+	if err := conn.ReadJSON(&frame); err != nil {
+		t.Fatalf("read before close: %v", err)
+	}
+
+	srv.Close()
+
+	// The connection must go away on its own. Without the fix the server keeps
+	// pushing job frames and this loop runs until the deadline.
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			if strings.Contains(err.Error(), "timeout") {
+				t.Fatal("server kept the connection alive after Close")
+			}
+			return // hung up, as it should be
+		}
+	}
+}

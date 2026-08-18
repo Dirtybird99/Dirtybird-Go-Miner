@@ -93,6 +93,8 @@ type Server struct {
 
 	mu          sync.Mutex
 	submissions []Submission
+	conns       map[*websocket.Conn]struct{}
+	closed      bool
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -115,8 +117,46 @@ func (s *Server) Addr() string { return s.srv.Listener.Addr().String() }
 // URL returns the "ws://host:port" dial URL.
 func (s *Server) URL() string { return "ws://" + s.Addr() }
 
-// Close shuts the server down. Safe to call more than once.
-func (s *Server) Close() { s.srv.Close() }
+// Close shuts the server down and closes every upgraded connection, so no
+// handler keeps pushing jobs at a client after the call returns. httptest
+// forgets hijacked connections, and would otherwise leave the handler and its
+// reader running. Safe to call more than once.
+func (s *Server) Close() {
+	s.mu.Lock()
+	s.closed = true
+	conns := make([]*websocket.Conn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.conns = nil
+	s.mu.Unlock()
+
+	for _, c := range conns {
+		c.Close()
+	}
+	s.srv.Close()
+}
+
+// track registers an upgraded connection, reporting false if Close already
+// ran and the handler should simply hang up.
+func (s *Server) track(conn *websocket.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	if s.conns == nil {
+		s.conns = make(map[*websocket.Conn]struct{})
+	}
+	s.conns[conn] = struct{}{}
+	return true
+}
+
+func (s *Server) untrack(conn *websocket.Conn) {
+	s.mu.Lock()
+	delete(s.conns, conn)
+	s.mu.Unlock()
+}
 
 // Submissions returns every submission received so far, in order.
 func (s *Server) Submissions() []Submission {
@@ -155,6 +195,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	if !s.track(conn) {
+		return
+	}
+	defer s.untrack(conn)
 
 	// Submissions are drained by a dedicated reader with no read deadline; see
 	// the package comment for the two traps this arrangement avoids.
@@ -168,6 +212,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			}
 			var sub getwork.Submit
 			if json.Unmarshal(msg, &sub) != nil {
+				continue
+			}
+			// Any JSON object decodes into a Submit with zeroed fields;
+			// counting those would inflate the number this package exists
+			// to measure.
+			if sub.JobID == "" || sub.Blob == "" {
 				continue
 			}
 			s.addSubmission(Submission{JobID: sub.JobID, Blob: sub.Blob})
@@ -204,18 +254,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// wireJob converts the public mirror to the internal wire frame, defaulting a
-// zero difficulty to 1000 so bare keepalive/status frames stay on the wire.
+// wireJob converts the public mirror to the internal wire frame. Every field
+// passes through verbatim, difficulty included: rewriting a zero would hand
+// back a job the caller meant the client to reject, which is exactly the
+// miner.ErrBadDiff path a test wants to drive.
 func wireJob(j Job) getwork.Job {
-	d := j.Difficulty
-	if d == 0 {
-		d = 1000
-	}
 	return getwork.Job{
 		JobID:             j.JobID,
 		Blockhashing_blob: j.BlockhashingBlob,
-		Difficulty:        strconv.FormatUint(d, 10),
-		Difficultyuint64:  d,
+		Difficulty:        strconv.FormatUint(j.Difficulty, 10),
+		Difficultyuint64:  j.Difficulty,
 		Height:            j.Height,
 		Blocks:            j.Blocks,
 		MiniBlocks:        j.MiniBlocks,
