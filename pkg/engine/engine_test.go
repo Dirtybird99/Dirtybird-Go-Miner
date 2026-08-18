@@ -6,21 +6,12 @@ package engine
 import (
 	"context"
 	"errors"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
-
-	"go-miner/internal/getwork"
+	"go-miner/pkg/fakegetwork"
 )
-
-// validBlob is a real 48-byte miniblock (version nibble 1), the shape a
-// getwork daemon pushes.
-const validBlob = "419ebb000000001bbdc9bf2200000000635d6e4e24829b4249fe0e67878ad4350000000043f53e5436cf610000086b00"
 
 func TestStartRejectsBadConfig(t *testing.T) {
 	cases := []struct {
@@ -89,42 +80,20 @@ func TestNormalizeThreads(t *testing.T) {
 // and Stats reports connected/height/hashrate before Stop tears everything
 // down.
 func TestStartStopConnectsAndStats(t *testing.T) {
-	upgrader := websocket.Upgrader{}
-	submits := make(chan getwork.Submit, 8)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		for i := 0; i < 3; i++ { // push a few jobs so workers re-snapshot
-			if err := conn.WriteJSON(getwork.Job{
-				JobID:             fmt.Sprintf("job-%d", i),
-				Blockhashing_blob: validBlob,
-				Difficultyuint64:  1000,
-				Height:            uint64(1000 + i),
-			}); err != nil {
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		for { // drain submits until the client goes away
-			var s getwork.Submit
-			if err := conn.ReadJSON(&s); err != nil {
-				return
-			}
-			select {
-			case submits <- s:
-			default:
-			}
-		}
-	}))
+	srv := fakegetwork.Start(fakegetwork.Config{
+		Jobs: []fakegetwork.Job{
+			fakegetwork.ValidJob("job-0", 1000),
+			fakegetwork.ValidJob("job-1", 1001),
+			fakegetwork.ValidJob("job-2", 1002),
+		},
+		PushInterval: 50 * time.Millisecond,
+	})
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	e, err := Start(ctx, Config{
-		Endpoint: "ws://" + srv.Listener.Addr().String(),
+		Endpoint: srv.URL(),
 		Wallet:   "dero1qytest",
 		Threads:  1,
 	})
@@ -157,8 +126,8 @@ func TestStartStopConnectsAndStats(t *testing.T) {
 	if st.Threads != 1 {
 		t.Fatalf("Threads = %d, want 1", st.Threads)
 	}
-	if !strings.Contains(st.Endpoint, srv.Listener.Addr().String()) {
-		t.Fatalf("Endpoint = %q, want host %q", st.Endpoint, srv.Listener.Addr().String())
+	if !strings.Contains(st.Endpoint, srv.Addr()) {
+		t.Fatalf("Endpoint = %q, want host %q", st.Endpoint, srv.Addr())
 	}
 	if st.Wallet != "dero1qytest" {
 		t.Fatalf("Wallet = %q", st.Wallet)
@@ -180,31 +149,20 @@ func TestStartStopConnectsAndStats(t *testing.T) {
 // non-version rejection (short blob / empty jobid) is a keepalive/status
 // frame and must NOT invalidate the last good job.
 func TestKeepaliveFrameDoesNotKillMining(t *testing.T) {
-	upgrader := websocket.Upgrader{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		_ = conn.WriteJSON(getwork.Job{JobID: "job-0", Blockhashing_blob: validBlob, Difficultyuint64: 1000, Height: 1000})
-		// keepalive frame with no blob
-		_ = conn.WriteJSON(getwork.Job{JobID: "ka"})
-		time.Sleep(2 * time.Second)
-		_ = conn.WriteJSON(getwork.Job{JobID: "job-1", Blockhashing_blob: validBlob, Difficultyuint64: 1000, Height: 1001})
-		for {
-			var s getwork.Submit
-			if err := conn.ReadJSON(&s); err != nil {
-				return
-			}
-		}
-	}))
+	srv := fakegetwork.Start(fakegetwork.Config{
+		Jobs: []fakegetwork.Job{
+			fakegetwork.ValidJob("job-0", 1000),
+			{JobID: "ka"}, // keepalive frame with no blob
+			fakegetwork.ValidJob("job-1", 1001),
+		},
+		PushInterval: 1 * time.Second,
+	})
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	e, err := Start(ctx, Config{
-		Endpoint: "ws://" + srv.Listener.Addr().String(),
+		Endpoint: srv.URL(),
 		Wallet:   "dero1qytest",
 		Threads:  1,
 	})
