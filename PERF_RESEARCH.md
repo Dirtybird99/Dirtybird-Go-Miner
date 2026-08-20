@@ -759,6 +759,192 @@ in-source rewrite touches. Closing it further needs hand-Go-asm on the inner
 loops (won't help the memory stalls) or a fundamentally lower-work SA
 decomposition than the whole miner family uses.
 
+## 2026-08-19 Go 1.27 `simd` assessed; arm64 SA kernels ported (correctness only)
+
+Go 1.27 shipped `simd` (portable, vector-size-agnostic) and `simd/archsimd`
+(arch-specific, revised amd64 API, new arm64 Neon). Both need
+`GOEXPERIMENT=simd` and neither is under the Go 1 compatibility promise.
+
+**amd64: no surface left, and the question is closed.** The vector-shaped
+kernels are already hand-written AVX2 (`sa_v114_equal_amd64_v3.s`,
+`sa_v114_materialize_amd64_v3.s`); `archsimd` on the comparator already measured
+1.59x slower; the radix scatter is memory-latency-bound with a twice-recorded
+null; `writeUniqueRunBatch` is already asm; and Raptor Lake has no AVX-512, so
+`VPCONFLICTD` and vector scatter are unavailable. Nothing was changed on amd64.
+
+**The portable package cannot express `buildEqualColumns` at all.** Its mask
+types expose only `And`, `Or`, `String`, and `ToIntNs` (`$GOROOT/src/simd/
+simd_stubs.go`); there is no movemask/bitmask extraction and no
+`AnyTrue`/`AllTrue`, so the `VPMOVMSKB` step has no portable spelling. Only
+`materializeOrigins` is expressible. That asymmetry is what selected hand asm.
+
+**arm64 was running the scalar path.** Both kernels were gated `!amd64.v3`, so
+every `linux/arm64`, `android-arm64`, and `darwin/arm64` release shipped scalar
+Go for work that is `+2.051%` and `+2.505%` on amd64. Ported both to hand-written
+Neon, no `GOEXPERIMENT`, no `go.mod` bump:
+
+- `sa_v114_materialize_arm64.s` — `VDUP` + two `VADD V.S4` per 32-byte block,
+  `VLD1.P`/`VST1.P`, same 8-element round-up the amd64 kernel relies on (the
+  `orderCap`/`arenaCap` `+8` padding already covers it).
+- `sa_v114_equal_arm64.s` — 16 `VMOVI $255` accumulators, `VCMEQ`+`VAND` over
+  eight 32-byte chunks per group, then per accumulator `VAND` with a
+  `[1,2,4,...,128]x2` weight vector and three self-`VADDP` rounds, which leaves
+  the 16-bit column mask in bytes 0-1; `VMOV V.S[0]` extracts it and four masks
+  are `ORR`-packed per output word. Byte-identical layout to the amd64
+  `VPMOVMSKB` path.
+- `sa_v114_uniquerun_stub.go` split out so the `!amd64.v3` stub is shared
+  instead of duplicated per architecture.
+
+**Correctness (arm64 verified under `qemu-aarch64-static`, byte-exactness only):**
+full `internal/astrobwt` suite green, including `TestV114DifferentialVsSAIS`,
+`TestDifferentialVsReference`, `TestV114FallbackRate`, `TestZeroAllocs`,
+`TestV114ZeroAllocsAfterWarmup`, and `TestV114MillionHashGate` at 20k hashes.
+amd64 `v1` and `v3` suites and the `v114stats` build unchanged and green.
+
+New `sa_v114_kernel_diff_test.go` gates both kernels against an in-test scalar
+reference: randomized over alphabets 1/2/3/16/256 and groupCounts 0-256, a
+one-differing-column-at-a-time sweep across all 256 columns, and a
+write-past-padding guard. It runs on every architecture, so it also re-validates
+the AVX2 kernels. **Positive controls:** `VADD`->`VSUB` in the materialize kernel
+and a one-bit shift error (`R6<<32` -> `R6<<33`) in the equal-columns packing
+both fail these tests on arm64. `TestV114FastPaths` also caught both, but it
+exercises a single fixed 3-group pattern, so it is not a sufficient gate for a
+16-accumulator kernel on its own.
+
+`.github/workflows/arm64-bench.yml` gained the four kernel gates (always) and
+the million-hash differential (`mode: smoke` only, so ~1M paired hashes never
+run immediately before a measured leg on a shared runner).
+
+**PERFORMANCE IS UNMEASURED.** qemu is correct for byte-exactness and worthless
+for throughput, which is exactly why `arm64-bench.yml` exists. No arm64 hashrate
+claim is made here and none should be quoted until that workflow has been
+dispatched against this change. The amd64 numbers above are the *motivation* for
+expecting a win, not evidence of one on Neon: `VPMOVMSKB` has no
+single-instruction Neon equivalent, so the equal-columns kernel in particular may
+land below its `+2.051%` amd64 figure.
+
+Two structural reasons to expect less than the amd64 figures, stated before
+measuring so a small number is not talked up afterwards. `VPMOVMSKB` has no
+single-instruction Neon equivalent (the weight-AND plus three `VADDP` rounds
+replace one instruction), and Neon is 128-bit against AVX2's 256-bit, so both
+kernels do twice the loop iterations per byte. `materializeOrigins` is the more
+exposed of the two: its hot call site is gated on `groupCount >= 4`
+(`sa_v114_emit.go:198`) while 1-3 group runs are 56.4% of the population, and
+the counts that do reach it are typically 4-8 -- a single Neon iteration, which
+is precisely where a 128-bit unit gives up the amd64 kernel's advantage. A null
+on Kernel A would be an unsurprising result, not a bug.
+
+## 2026-08-19 Go 1.27 amd64 re-probe -- three nulls, and the comparator explained
+
+Test-only probes under `GOEXPERIMENT=simd`, gated `//go:build goexperiment.simd
+&& amd64` in `sa_v114_simdprobe_amd64_test.go`, `sa_v114_cmpprobe_amd64_test.go`,
+and `sa_v114_lcpstats_amd64_test.go`. No production file, no `go.mod` bump, no CI
+change: `simd` is absent from `$GOROOT/api/*.txt` so vet's `stdversion` never
+fires, and the import compiles with the directive still at `go 1.25.0`. Negative
+control: with `GOEXPERIMENT` unset `go list` reports 0 of the 3 files, and the
+`v1`/`v3` suites are unchanged. Every probe carries an equality gate against the
+shipping kernel or `referenceEqualColumns`; all green.
+
+**Structural finding: the portable `simd` package dispatches per call.** Each
+function using it compiles to four clones -- `@simd0`, `@simd128`, `@simd256`,
+`@simd512` -- behind a trampoline that loads `simd.maxVectorSize`, compares
+against 0x80/0x100/0x200, and **CALLs** the clone (`go tool objdump` on
+`probeMaterializeSIMD`). It is not inlined and not devirtualized. `archsimd`
+emits one direct symbol with no dispatch. That difference alone disqualifies the
+portable package for small hot kernels.
+
+**Probe 1, `materializeOrigins` under portable `simd`** -- median ns/op,
+`GOMAXPROCS=1`, `-benchtime=3000000x -count=10`, judged counts 4/5/8:
+
+| n | asm | portable simd | scalar |
+|---|---|---|---|
+| 4 | 1.74 | 3.03 | 3.75 |
+| 5 | 1.55 | 2.89 | 3.16 |
+| 8 | 1.65 | 3.04 | 4.23 |
+| 512 (diag) | 19.4 | 36.0 | 104.3 |
+
+**~1.8x slower than the asm at every size.** It does beat scalar, so it would be
+the right tool on an architecture with no hand kernel, but the gap persists at
+n=512, so it is not only the trampoline.
+
+**Probe 2, `buildEqualColumns` under `archsimd`** -- judged group counts:
+
+| groups | asm | archsimd |
+|---|---|---|
+| 3 | 6.22 | 6.28 |
+| 4 | 8.44 | 8.71 |
+| 5 | 9.82 | 10.82 |
+| 8 | 16.18 | 18.44 |
+| 64 (diag) | 119.7 | 156.2 |
+
+Within 1-14% at the judged sizes and never faster. **Methodology warning for
+anyone re-running this:** the first revision held the eight mask accumulators in
+a `[8]archsimd.Mask8x32` array and measured **3.6x slower**. archsimd's own doc
+warns against putting vector types in aggregates; eight named variables
+recovered the entire gap. That first number was a bug in the probe, not a fact
+about archsimd.
+
+**Probe 3, the comparator -- the pre-registered judged arm was WRONG, and
+measuring it is what produced the answer.** The arm was first set to common
+prefixes {0,2,7,15} on the reading that "the walks are cheap". New
+`TestMeasureComparatorPrefixLengths` measured the actual population instead:
+100,557,233 equal-key adjacent suffix-array pairs drawn from 2000 real hashes
+via `astroBWTv3Stream`.
+
+**This is a proxy, not the comparator's exact call population.** It counts every
+adjacent SA pair sharing a 3-byte key -- roughly 50k per hash -- while `:246-256`
+puts the merge comparator at ~331 groups over ~1500-1700 records per hash, and
+`constantRunOrder` short-circuits 99.98% of large literal groups without calling
+it at all. So the sample is ~30x broader and over-represents exactly the
+repeated-byte runs the closed form removes. The null is insensitive to any
+reweighting because the kernel wins or ties at **both** ends of the sweep
+(1.72-1.84 vs archsimd 3.31-3.40 below 8 bytes, and 2.6x at 4096).
+
+| common prefix after the 3-byte key | share |
+|---|---|
+| <8 (the BE-u64 word resolves) | 7.50% |
+| 8-31 | 17.21% |
+| 32-63 | 19.36% |
+| 64-255 | 53.42% |
+| >=256 | 2.51% |
+
+Mean **96.15 bytes**, and **75.29%** are long enough for a 32-byte scan to
+reach. The judged arm was moved to {32,64,96,128} on this evidence before
+re-benchmarking. Two arms were tried: a pure archsimd single-pass scan, and a
+hybrid keeping the shipping big-endian word and replacing only the
+`bytes.Compare` tail.
+
+| common | kernel | hybrid | archsimd |
+|---|---|---|---|
+| 32 | 4.74 | 4.53 | 4.59 |
+| 64 | 5.61 | 5.91 | 6.08 |
+| 96 | 5.33 | 6.88 | 8.85 |
+| 128 | 6.61 | 7.62 | 8.11 |
+| 256 (2nd) | 7.56 | 11.64 | 12.88 |
+| 4096 (diag) | 66.6 | 151.5 | 172.8 |
+
+c64/c96/c128 were re-measured at `-benchtime=8000000x -count=21` after the first
+pass looked non-monotonic; kernel c96 replicates tightly at 5.33 (range
+4.95-5.65) and really is faster than kernel c64 at 5.61, presumably a size-class
+branch inside the runtime's memcmp. Recorded as measured rather than smoothed.
+
+Parity at c32-c64, the kernel **wins by 29% at c96 and 15% at c128** where the
+distribution actually sits, and the kernel is **2.6x faster** once prefixes get
+long. **Mechanism: the comparator was never a scalar loop.** Its tail is
+`bytes.Compare`, which is the Go runtime's hand-tuned AVX2 memcmp with wide
+unrolled strides; a straightforward 32-byte archsimd loop cannot approach it.
+This also *explains* rather than contradicts `:466-470` -- the walks are long
+but cheap precisely because the runtime already vectorises them, which is why
+per-call overhead dominated the +5.4%.
+
+**No escalation.** The pre-registered trigger was parity-or-better on the judged
+arm; nothing met it, so no candidate was built and no sustained instrument was
+run. The probes are kept as test-only files: they cost nothing in a normal build
+and they are the evidence for the closed question below. They are **pinned to the
+1.27 `archsimd` API**, which is outside the Go 1 compatibility promise and is
+expected to move in 1.28, so the next person to set `GOEXPERIMENT=simd` should
+expect to fix them up or delete them rather than trust that they still build.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
@@ -766,6 +952,16 @@ decomposition than the whole miner family uses.
   `trsort.c`); it has no libsais. Same family as v114. SA gains must come from
   engineering, not algorithm swaps.
 - *Would a lookup-table op kernel help?* No on Raptor Lake; see above.
+- *Does Go 1.27's `simd`/`archsimd` package help on amd64?* No. Every vector-shaped
+  kernel is already hand-written AVX2, `archsimd` measured 1.59x slower on the
+  comparator, and the remaining hot loops are memory-latency-bound or already asm.
+  The portable `simd` package also cannot express a movemask, so it could not
+  replace `buildEqualColumns` even at parity. **Re-confirmed by direct measurement
+  under the 1.27 API, 2026-08-19:** portable `simd` is 1.8x slower than the asm on
+  `materializeOrigins` (it compiles a per-call dispatch trampoline to four clones),
+  `archsimd` is 1-14% slower on `buildEqualColumns`, and on the comparator the
+  shipping kernel wins by 13-24% across the measured prefix distribution because
+  its `bytes.Compare` tail is already the runtime's AVX2 memcmp. Closed.
 - *AVX-512 multi-buffer SHA-256 (16-lane, minio/sha256-simd)?* Not on this host:
   Raptor Lake has no AVX-512. The "2x-interleaved SHA-NI is ~2x" figure is AMD-specific
   (Intel shows ~no gain); we already ship 2-way SHA-NI at ~1.3x, capped by Raptor Cove's
