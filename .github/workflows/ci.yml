@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - name: Linux deps (shellcheck + qemu + arm64 glibc, retried)
         if: matrix.os == 'ubuntu-latest'
         run: |
