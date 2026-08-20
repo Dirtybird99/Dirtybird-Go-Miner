@@ -116,7 +116,7 @@ the ARM SHA2 path has a measured win.
 
 ## Build from source
 
-Go 1.25+:
+Go 1.27+:
 
 ```
 GOAMD64=v3 go build -pgo=default.pgo -trimpath -ldflags "-s -w" -o go-miner .

@@ -28,7 +28,7 @@ Instead, please use one of the following methods:
 ## Scope
 
 This policy applies to the latest version of the software on the `main` branch, built
-from source with Go 1.25+ (`GOAMD64=v3 go build -pgo=default.pgo`) to produce the
+from source with Go 1.27+ (`GOAMD64=v3 go build -pgo=default.pgo`) to produce the
 `go-miner` binary.
 
 Please note:

@@ -158,8 +158,12 @@ Default loop:
 2. Establish a fresh matrix baseline with `scripts\bench-matrix.ps1 -Candidate baseline`.
 3. Profile only the current best setting with `--cpuprofile`.
 4. Try one hot-path candidate at a time.
-5. Keep it only if median `BenchmarkHashV114` improves by at least 2% and
-   sustained `20 --pin --high` does not regress.
+5. Keep it only if it clears the retention gate in PERF_RESEARCH.md "Gates
+   For Any Candidate": one-sided 95% lower bound above the ~0.6% attribution
+   floor on the paired instruments at either target (20T sustained is
+   primary), and no demonstrated regression beyond 0.5% at the other.
+   Decide on the drift-adjusted Thue-Morse fit and the paired micro couples,
+   never on raw medians.
 
 Plausible transferable ideas include flatter tables, branch reduction, and
 measured loop unrolling. Regex prefilters and skip-ahead strategies are not
