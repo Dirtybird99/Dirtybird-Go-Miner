@@ -24,7 +24,11 @@ jobs:
           for i in 1 2 3; do sudo apt-get update -qq && break || sleep 10; done
           sudo apt-get install -y -qq shellcheck qemu-user-static libc6-arm64-cross
       - name: Vet
-        run: go vet ./...
+        run: |
+          # Twice on purpose: a vet leg that does not set the build's own
+          # GOAMD64 cannot see that build's assembly, and release ships v3.
+          go vet ./...
+          GOAMD64=v3 go vet ./...
       - name: Test (GOAMD64=v1)
         env:
           GOAMD64: v1
