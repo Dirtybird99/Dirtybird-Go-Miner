@@ -945,6 +945,68 @@ and they are the evidence for the closed question below. They are **pinned to th
 expected to move in 1.28, so the next person to set `GOEXPERIMENT=simd` should
 expect to fix them up or delete them rather than trust that they still build.
 
+## 2026-08-19 v114 scratch carved from one contiguous region -- micro NULL, kept
+
+`newV114Scratch` allocated eight separate buffers with `make()`. It now
+allocates ONE `[]byte` and carves all eight out of it (`sa_v114.go`,
+`carveV114Scratch`). Construction allocations drop 8 -> 1; the per-hash path is
+untouched.
+
+**Why, given the null.** This is not a speed change, it is the prerequisite for
+one, plus two defects fixed:
+
+- The reverted large-page allocator (`8796f4a`) had **two divergent construction
+  paths** -- a carve out of the VirtualAlloc region and eight `make()`s. CI never
+  holds `SeLockMemoryPrivilege`, so only the `make()` branch ever ran and the
+  carve's hand-counted byte offsets shipped with **zero test coverage**. One path
+  means every CI leg now executes it.
+- The region was deliberately never freed. Fine for a process-lifetime miner,
+  wrong for `pkg/engine`: `Start` creates `Threads+1` Hashers and `Stop`
+  (`engine.go:293-296`) releases none, so a pool-failover restart loop leaked
+  ~2.8 MiB per thread per cycle with `MaxThreads = 255`. A GC-tracked `[]byte`
+  dies with its Hasher.
+- It **isolates contiguity from 2 MiB page size**. The +0.899% at
+  `:691-719` conflated them; large pages are now a one-line swap of the
+  `make([]byte, v114ScratchBytes)` over a carve that is already tested.
+
+**Micro screen: +0.009%, 95% CI [-0.458%, +0.477%]**, one-sided lower bound
+-0.377% (20 couples, affinity 0x1, `-pgo=default.pgo`, GOAMD64=v3,
+`bench-results/micro-couples/20260819-203732-carve`). A null inside the ~0.6%
+attribution floor, which is the expected and desired result -- contiguity alone
+should not move a 1-thread number, and 1T barely exercises the page walkers.
+`armsIdentical=False` confirmed before reading the number. **The 20T sustained
+leg has NOT been run** (the box was ~10% busy with background apps; per the
+2026-07-09 retraction, a contaminated sustained number is worse than none).
+
+**Safety, since a wrong suffix array is a wrong share.** Segment reservation goes
+through a bounds-checked reslice `base[off:off+n]`, which validates the whole
+extent -- strictly stronger than the prior art's `&base[off]`, which checked only
+the first byte and would let `unsafe.Slice` fabricate a 283 KB segment over one
+valid byte. Element counts are stated once (`u32(n)`/`run(n)` derive bytes), and
+an end-of-carve equality assertion catches a future ninth buffer. Sizes come from
+`unsafe.Sizeof`, not the old `(8+8+4+4+4+4)` literal. No `uintptr` appears, so
+`unsafeptr` -- the analyzer that caused the revert -- has nothing to flag.
+
+New `sa_v114_carve_test.go` (no build tags, every platform and CI leg): layout,
+a tagged no-aliasing fill at full cap, and containment re-checked after 200 real
+hashes -- the last asserts only order-independent properties because
+`radixSortRunsByStoredKey` swaps `runs`/`radixTmp` and `mergeEqualKeyRuns` swaps
+`runLens`/`nextLens`. **Positive controls:** reusing an offset, under-sizing the
+budget by one cache line, and dropping the 64-byte rounding each fail these
+tests; the aliasing test names the culprit
+(`order[0] ... tag 1, clobbered by segment tag 8`).
+
+Gates: vet; `go test` at `GOAMD64=v1` and `v3`; `-tags v114stats`;
+`go test -race`; cross-builds for linux/darwin/android arm64 and the build-only
+s390x leg; and the full arm64 suite under `qemu-aarch64-static` reporting
+`V114 GATE: 20016/20000 hashes matched, 0 fallbacks`.
+
+**One measured hypothesis retired.** The old "64-byte aligned" justification buys
+nothing: over 200 allocations at `GOAMD64=v3`, seven of the eight buffers already
+land on 4096-byte boundaries under plain `make()`, because they exceed 32 KiB and
+come from Go's large-object allocator. Only `order` (2080 B) was a small object.
+Do not spend a campaign on alignment.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest

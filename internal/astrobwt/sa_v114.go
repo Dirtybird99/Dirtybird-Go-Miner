@@ -14,6 +14,7 @@ package astrobwt
 
 import (
 	"sync/atomic"
+	"unsafe"
 )
 
 const (
@@ -61,21 +62,100 @@ type v114Scratch struct {
 	nextLens []uint32
 }
 
+const (
+	v114OrderCap = stage4MaxGroupRun + 8 // the +8 the SIMD kernels round up into
+	v114ArenaCap = arenaIndexCount + 8
+	v114RunCap   = int(MAX_LENGTH)
+	v114SegAlign = 64
+
+	v114SzU32 = int(unsafe.Sizeof(uint32(0)))
+	v114SzRun = int(unsafe.Sizeof(stage5Run{}))
+
+	v114SegOrder = (v114OrderCap*v114SzU32 + v114SegAlign - 1) &^ (v114SegAlign - 1)
+	v114SegArena = (v114ArenaCap*v114SzU32 + v114SegAlign - 1) &^ (v114SegAlign - 1)
+	v114SegRuns  = (v114RunCap*v114SzRun + v114SegAlign - 1) &^ (v114SegAlign - 1)
+	v114SegPos   = (v114RunCap*v114SzU32 + v114SegAlign - 1) &^ (v114SegAlign - 1)
+
+	v114ScratchBytes = v114SegOrder + v114SegArena + 2*v114SegRuns + 4*v114SegPos
+)
+
+// v114Carver hands out cache-line-separated segments of one contiguous region.
+type v114Carver struct {
+	base []byte
+	off  int
+}
+
+// bytes reserves n bytes and advances to the next cache line. The reslice
+// bounds-checks the whole extent, unlike &base[off], which would check only the
+// first byte and let unsafe.Slice fabricate a whole segment over one valid byte.
+func (c *v114Carver) bytes(n int) unsafe.Pointer {
+	seg := c.base[c.off : c.off+n]
+	c.off += (n + v114SegAlign - 1) &^ (v114SegAlign - 1)
+	return unsafe.Pointer(&seg[0])
+}
+
+// u32 and run take an element count, so a segment's reservation and its length
+// are stated once and cannot drift apart.
+func (c *v114Carver) u32(n int) []uint32 {
+	return unsafe.Slice((*uint32)(c.bytes(n*v114SzU32)), n)
+}
+
+func (c *v114Carver) run(n int) []stage5Run {
+	return unsafe.Slice((*stage5Run)(c.bytes(n*v114SzRun)), n)
+}
+
+// newV114Scratch allocates the reusable buffers; ~2.8MB per Hasher on first
+// v114 use.
 func newV114Scratch() *v114Scratch {
-	const (
-		orderCap = stage4MaxGroupRun + 8
-		arenaCap = arenaIndexCount + 8
-	)
-	return &v114Scratch{
-		order:    make([]uint32, 0, orderCap),
-		arena:    make([]uint32, 0, arenaCap),
-		runs:     make([]stage5Run, 0, MAX_LENGTH),
-		radixTmp: make([]stage5Run, MAX_LENGTH),
-		groupPos: make([]uint32, 0, MAX_LENGTH),
-		mergePos: make([]uint32, MAX_LENGTH),
-		runLens:  make([]uint32, 0, MAX_LENGTH),
-		nextLens: make([]uint32, 0, MAX_LENGTH),
+	v, _ := carveV114Scratch()
+	return v
+}
+
+// carveV114Scratch also returns the backing region, which only the layout test
+// needs; production drops it.
+//
+// The eight slice headers hold interior pointers into base, and Go resolves any
+// address inside a heap object back to that object, so the region lives exactly
+// as long as the last surviving slice.
+//
+// Every element type carved here is pointer-free, and that is load-bearing:
+// base is a []byte, so its span is NOSCAN and carries no pointer bitmap. The
+// collector never scans a word in this region, which is legal only because no
+// pointer is ever stored in it.
+//
+// Segment identity is not durable past the first hash: radixSortRunsByStoredKey
+// swaps runs with radixTmp and mergeEqualKeyRuns swaps runLens with nextLens.
+// Both preserve containment, disjointness and caps, which is all any later
+// assertion may rely on.
+func carveV114Scratch() (*v114Scratch, []byte) {
+	c := v114Carver{base: make([]byte, v114ScratchBytes)}
+
+	order := c.u32(v114OrderCap)
+	arena := c.u32(v114ArenaCap)
+	runs := c.run(v114RunCap)
+	radixTmp := c.run(v114RunCap)
+	groupPos := c.u32(v114RunCap)
+	mergePos := c.u32(v114RunCap)
+	runLens := c.u32(v114RunCap)
+	nextLens := c.u32(v114RunCap)
+
+	if c.off != v114ScratchBytes {
+		// Unreachable while every term is constant. Live so that adding a
+		// buffer or changing a cap without updating the budget fails on the
+		// first Hasher rather than aliasing two segments.
+		panic("astrobwt: v114 scratch carve consumed the wrong number of bytes")
 	}
+
+	return &v114Scratch{
+		order:    order[:0],
+		arena:    arena[:0],
+		runs:     runs[:0],
+		radixTmp: radixTmp,
+		groupPos: groupPos[:0],
+		mergePos: mergePos,
+		runLens:  runLens[:0],
+		nextLens: nextLens[:0],
+	}, c.base
 }
 
 // buildStage5Flags is the port of build_v114_stage5_flags (sa_v114.zig):
