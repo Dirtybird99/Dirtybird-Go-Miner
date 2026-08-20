@@ -62,6 +62,30 @@ jobs:
           grep -q -- '--- PASS: TestHashPairMatchesHash' gates.txt
           grep -q -- '--- PASS: TestPairDifferentialVsSingle' gates.txt
           grep -q 'pairHashAvailable=true' gates.txt # hardware batch path must be live
+      - name: NEON kernel gates (arm64-only code paths)
+        run: |
+          # buildEqualColumns and materializeOrigins are hand-written NEON on
+          # arm64 with no scalar twin compiled in, so these are the only runs
+          # that ever execute them.
+          go test ./internal/astrobwt -count=1 -v \
+            -run '^(TestV114FastPaths|TestBuildEqualColumnsMatchesReference|TestBuildEqualColumnsIsolatesEachColumn|TestMaterializeOriginsMatchesReference)$' \
+            | tee kernels.txt
+          grep -q -- '--- PASS: TestV114FastPaths' kernels.txt
+          grep -q -- '--- PASS: TestBuildEqualColumnsMatchesReference' kernels.txt
+          grep -q -- '--- PASS: TestBuildEqualColumnsIsolatesEachColumn' kernels.txt
+          grep -q -- '--- PASS: TestMaterializeOriginsMatchesReference' kernels.txt
+      - name: Million-hash differential (v114 NEON vs SAIS)
+        # Gates only, never before a measured leg: ~1M paired hashes would
+        # thermally load a shared runner right where the benches read.
+        if: inputs.mode == 'smoke'
+        env:
+          V114_GATE_HASHES: "1000000"
+        run: |
+          # The strongest correctness gate in the repo; it ran on amd64 only
+          # until the SA kernels grew an arm64 variant.
+          go test ./internal/astrobwt -count=1 -v -timeout 60m \
+            -run '^TestV114MillionHashGate$' | tee million.txt
+          grep -q -- '--- PASS: TestV114MillionHashGate' million.txt
       - name: Micro bench (single vs pair)
         if: inputs.mode != 'smoke'
         run: |
@@ -83,6 +107,8 @@ jobs:
           name: arm64-bench-${{ inputs.mode }}
           path: |
             gates.txt
+            kernels.txt
+            million.txt
             bench.txt
             sustained-*.txt
           if-no-files-found: ignore
