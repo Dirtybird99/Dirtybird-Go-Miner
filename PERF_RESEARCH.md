@@ -1051,8 +1051,210 @@ Same shape as the two other blind spots found this session: the arm64 SA kernels
 that no CI leg executed, and the large-page carve that no CI leg reached. If a
 release build sets a flag, the analysis leg has to set it too.
 
+## 2026-08-20 Go 1.27.0 toolchain (Q1 parity), PGO refresh under 1.27 (Q2 RETAINED), follow-on arms
+
+Go 1.27.0 has been the local toolchain since 2026-08-18 while CI pinned 1.26.x
+and release.yml pinned 1.26.5, so every release binary and every sustained
+number before this entry is a 1.26.5 artifact. This entry moves the floor
+(`go.mod` 1.25.0 -> 1.27.0, the five workflow pins, README/SECURITY/script.sh)
+and measures what the move could change: the toolchain itself (Q1), the
+profile it compiles against (Q2), and four opted-in follow-on arms (E1-E3,
+E5; E4 was conditional on a Q1 regression that did not happen). Every block
+was pre-registered in the vault (`02-projects/go-miner/go127-prereg-2026-08-20.md`)
+before it ran, including the two replication rules below.
+
+**What 1.27 changes for this code.** The release notes have nothing for a
+zero-alloc, asm-adjacent hot loop: the size-specialized allocator never runs
+per hash, `simd`/`archsimd` were re-probed null on 2026-08-19, and the hot
+runtime primitives (`memmove_amd64.s`, `bytealg/compare_amd64.s`,
+`equal_amd64.s`, `indexbyte_amd64.s`) are byte-identical between 1.26.6 and
+1.27.0. The unlisted backend work is what could move it: new `known bits` and
+`loop invariant` SSA passes, a generalized `loopbce`, the regalloc `regMask`
+rewrite, CSE of loads across non-aliasing stores, and new generic/AMD64 rules
+(carry/borrow via `SETB`, flags->bool->flags round-trip removal). Measured on
+this package at v3 + the old `default.pgo`: hot-path text 9,589 -> 9,494
+instructions over the 12 hot functions (`go tool objdump`); `astroBWTv3Stream`
+-69 (the op kernel loses most of its `PUSHFQ` flag spills), `buildSAv114` -16,
+`writeFusedRunsToSA` -15, `mergeEqualKeyRuns` -13, `tryWriteTwoRuns` **+17**
+(LICM hoists two `ANDL` masks into spills; `-d=ssa/loop_invariant/off`
+restores it and touches nothing else). `-d=ssa/check_bce/debug=1`: **400
+remaining bounds checks under both toolchains, identical per file.** Inliner
+budgets and PGO thresholds are unchanged; `-d=pgodebug=1` with the old
+profile gives the same 19 hot functions, 12 hot-budget inlines and 2 hot-big
+refusals (`hot-callsite-thres-from-CDF=0.0929`) under 1.26.5 and 1.27.0. Prior
+for Q1, stated before measuring: |delta| <~ 0.5%, sign unknown. The go.mod
+directive bump itself changes no codegen: the hot-function instruction
+streams of `internal/astrobwt` test binaries built under `go 1.25.0` and
+`go 1.27.0` are identical (9,830 instructions); only the main package's
+`DefaultGODEBUG` string differs (the 1.25 set
+`cryptocustomrand=1,tlssecpmlkem=0,urlstrictcolons=0` goes away; none of the
+1.27 defaults touches a path this miner exercises).
+
+**Why Q2 had a positive prior.** `default.pgo` was captured 2026-07-08 (122 s,
+20T) and never regenerated. `appendOrderGroup` (5.44% flat / 8.34% cum) and
+`radixOrderKey` (1.46%) no longer exist, so ~7% of its flat weight was
+orphaned; it predated the AstroX campaign, so `constantRunOrder`,
+`buildEqualColumns`, `materializeOrigins` and `writeUniqueRunBatch` carried no
+weight; and `suffixLessAfterKey` was never inlined into its callers. Earlier
+refreshes: 2026-08-03 +0.73%/1T, +0.17%/20T (4-leg 45 s protocol); 2026-08-09
++1.22% [-1.78, +4.32]; 2026-08-09 x2 +0.77%, LB +0.19%.
+
+**Arms.** Source `f8f5ac2`, `go.mod` left at 1.25.0 for the Q1/Q2 arms,
+`GOAMD64=v3`, `CGO_ENABLED=0`, `-trimpath -ldflags "-s -w"`; Q1 base built with
+`GOTOOLCHAIN=go1.26.5` (the release pin), everything else go1.27.0. Fresh
+profile: `gm_go1270_default.exe --sustained --secs 120 -t 20 --sa v114
+--pair=false --pin --high --cpuprofile` (24.79 KH/s steady; sha256
+`aad3ab999c134daa...`), the same shape as the old profile's provenance; a
+merged 20T+1T variant was screened and not promoted. Every arm's `go version
+-m` first line and sha256 are in `env.txt` of each run dir;
+`armsIdentical=False` on every judged block, and a deliberate identical-arms
+control block made the detector fire (`armsIdentical=True`). Layout-null A/A
+arm = one unused `//go:noinline` func kept alive through a package var (an
+unreferenced one is dead-stripped and yields a byte-identical binary).
+
+**20T Thue-Morse (8 legs x 240 s + discarded warm-up, drift-adjusted fit, df=4):**
+
+| block | point | SE | 95% CI | one-sided LB | drift |
+|---|---:|---:|---|---:|---:|
+| A/A layout-null | +0.220% | 0.50 pp | [-1.147%, +1.605%] | -0.831% | +0.39%/leg |
+| Q1 go1.26.5 -> go1.27.0 | **+0.160%** | 0.16 pp | **[-0.292%, +0.614%]** | -0.187% | -0.98%/leg |
+| Q2 default.pgo -> fresh, block 1 | -0.441% | 0.38 pp | [-1.492%, +0.622%] | -1.249% | +0.50%/leg |
+| Q2 default.pgo -> fresh, block 2 (pre-registered replication) | -0.130% | 0.32 pp | [-1.009%, +0.755%] | -0.806% | +0.07%/leg |
+| **Q2 pooled (inverse-variance, df=8)** | **-0.257%** | 0.24 pp | **[-0.818%, +0.306%]** | -0.710% | |
+| E1 asyncpreemptoff=1 | -0.007% | 0.34 pp | [-0.945%, +0.941%] | -0.728% | +0.17%/leg |
+| E2 large pages, block 1 | +0.460% | 0.63 pp | [-1.269%, +2.219%] | -0.871% | +0.34%/leg |
+| E2 large pages, block 2 (pre-registered replication) | -0.133% | 0.24 pp | [-0.793%, +0.532%] | -0.640% | +0.40%/leg |
+| **E2 pooled (inverse-variance, df=8)** | **-0.058%** | 0.22 pp | **[-0.571%, +0.458%]** | -0.472% | |
+| E3 `-d=alignhot=0` | -0.316% | 0.12 pp | [-0.659%, +0.029%] | -0.580% | +0.60%/leg |
+
+Steady rates 24.7-25.5 KH/s on every arm (the session's absolute level; not
+comparable to other days). The A/A sits inside the instrument-OK band at the
+upper edge of the SE range (0.5 pp).
+
+**1T micro (20 couples, 600x; P-core 0x1 / E-core 0x10000):**
+
+| block | point | 95% CI | one-sided LB |
+|---|---:|---|---:|
+| A/A layout-null, P (06:38 / post-idle 09:02) | +0.346% / +0.137% | [-0.565, +1.264] / [-0.432, +0.709] | -0.407% / -0.333% |
+| Q1 go1.26.5 -> go1.27.0, P / E | +0.233% / +0.186% | [-0.789, +1.265] / [-0.189, +0.562] | -0.612% / -0.124% |
+| **Q2 fresh vs default.pgo, P / E (post-idle)** | **+1.419% / +0.489%** | **[+0.667, +2.175] / [+0.104, +0.876]** | **+0.798% / +0.171%** |
+| Q2 (06:47 contaminated window), P / E | +1.623% / +0.548% | [+0.193, +3.074] / [-0.358, +1.462] | screen only |
+| Q2 merged 20T+1T profile, P | +1.335% | [+0.196, +2.487] | screen only |
+| ref -pgo=off -> default.pgo / -> fresh, P | +1.042% / +0.671% | [-0.721, +2.837] / [-0.542, +1.900] | -0.417% / -0.332% |
+| E2 large pages (vs `-tags nolargepages`), P / E | +0.888% / +0.200% | [+0.108, +1.674] / [-0.116, +0.516] | +0.243% / -0.061% |
+| E3 `-d=alignhot=0` / `pgoinlinecdfthreshold=95` / `pgoinlinebudget=4000` / `GOEXPERIMENT=newinliner`, P | -0.167% / **-0.681%** / -0.506% / -0.181% | [-0.891, +0.562] / [-1.250, -0.110] / [-1.300, +0.295] / [-1.193, +0.842] | all below floor |
+| identical-arms control (same exe both arms, 10:02) | -0.493% | [-1.342, +0.362] | detector fired |
+
+Two protocol findings of the day, recorded because they change how the
+numbers above must be read. (1) The 06:47-06:50 micro window was
+non-stationary: those blocks ran 90 s after the arm builds and ~5 min after
+the 20T profile capture, a P-core-1 (`0x4`) re-screen minutes later gave A/A
+-0.62% [-1.45%, +0.21%] with ~18% within-block ns/op swings, and the three
+PGO pairs from the window are not transitive; the post-idle 09:02 re-run is
+the evidence, the 06:47 rows are screens. (2) The E micro screens at 10:02
+ran right after a 20T block and the identical-arms control in that window
+read -0.49% -- same lesson, so the E2/E3 micro rows are screens too. Micro
+screens need the same idle cooldown as legs; it is now written into the
+gates below.
+
+**Decisions.**
+- **Q1: parity -> Go 1.27 adopted** (commits `302e137` build: toolchain
+  floor; `35be37b` ci: workflow pins). The tightest block of the session puts
+  the 1.26.5 -> 1.27.0 delta at +0.16% with a +/-0.45 pp CI -- exactly the
+  prior. No throughput claim attaches to the toolchain; arm64-bench.yml's
+  pin bump starts a new measurement epoch there.
+- **Q2: RETAINED, fresh profile committed as `default.pgo` (`ed9d2c7`).** At
+  1T the fresh profile is real and above the floor (P-core LB +0.798%); at 20T
+  the two independent blocks pool to -0.257% [-0.818%, +0.306%], i.e. no
+  demonstrated regression (point and CI upper above -0.5%). The relaxed gate
+  keeps it; the pooling rule was fixed in the vault before block 2 ran, after
+  block 1 alone had put the "no regression" clause on a 0.06 pp margin.
+  Mechanism, from `-d=pgodebug=1`: threshold 0.0929 -> 0.0883, hot functions
+  19 -> 22, hot-budget inlines 12 -> 33 -- `suffixLessAfterKey` (cost 337) is
+  now inlined into `mergeSortedPositionsAfterKey`, `tryWriteLiteralGroup` and
+  `tryWriteTwoRuns`, and `constantRunOrder`, `appendOriginGroup`,
+  `mergeEqualKeyRuns` and the emit family into their callers. That is the
+  per-call comparator overhead the 2026-08-06 campaign bounded (+1.25% for the
+  walk alone, +4.1 pp per-call share of the +5.4% ceiling), captured by the
+  profile instead of by hand, and a compute-bound 1T win not transferring to
+  20T is the documented pattern here. `-pgo=off` -> old profile screened at
+  +1.0% [-0.7, +2.8] and -> fresh at +0.7% [-0.5, +1.9] in the contaminated
+  window: PGO is worth about a percent at 1T whichever profile drives it.
+- **E5 (inline-header comparator): not built.** The pre-registered gate was
+  "check whether the fresh profile already inlines the comparator"; it does,
+  at all three call sites. Nothing is left for a hand-inlined header to
+  recover. Closed.
+- **E1 (`asyncpreemptoff=1`): null, closed.** `//go:debug asyncpreemptoff=1`
+  is rejected by the go command (runtime-only GODEBUG, not in the go:debug
+  table); the arm was built with what the directive compiles to,
+  `-ldflags=-X=runtime.godebugDefault=asyncpreemptoff=1` (the runtime's own
+  `parsegodebug` applies it; string-proofed: `asyncpreemptoff=1` present in
+  the cand binary, absent in base). -0.007% [-0.945%, +0.941%] at 20T. The
+  10 ms sysmon handoff itself is not removable by GODEBUG.
+- **E3 compile knobs: all closed.** `-d=alignhot=0` is slightly negative at
+  20T (-0.316% [-0.659%, +0.029%], SE 0.12 pp) -- PGO hot-block alignment is
+  worth keeping; `pgoinlinecdfthreshold=95` regresses at 1T (-0.68%
+  [-1.25%, -0.11%]); `pgoinlinebudget=4000` leans negative; `newinliner`
+  null. Shipping any of them would also have needed a `-gcflags` line in
+  release.sh/build-release.ps1.
+- **E2 (2 MiB large pages, vet-clean re-implementation of 8796f4a): not
+  shipped.** Block 1 read +0.46% with the widest CI of the day (SE 0.63 pp),
+  which put the verdict on the instrument rather than on the arm, so one
+  replication was pre-registered with the rule "ship iff the pooled 20T LB
+  clears +0.6%". Block 2: -0.133% [-0.793%, +0.532%]; pooled -0.058%
+  [-0.571%, +0.458%], LB -0.472%. The 2026-08-13 +0.899% (every leg positive)
+  does not reproduce in this epoch: that figure came from the pre-carve tree
+  under 1.26.5, and nothing in the mechanism argument survives a null this
+  tight -- the radix passes stream the same 4 KiB of records per hash
+  whichever way the pages are mapped, and the per-thread working set already
+  sits inside L2. Committed as `fc15ec9` and reverted in the following
+  commit, so the vet-clean allocator is one `git revert` away for a host or
+  epoch where page walks are back on the profile. Dead end until then.
+
+**E2 implementation notes (what is on the branch regardless of the verdict).**
+`largepage_windows.go` (`//go:build windows && !nolargepages`) enables
+`SeLockMemoryPrivilege` best-effort, lets `VirtualAlloc(MEM_LARGE_PAGES)`
+adjudicate, and returns the region as `[]byte` plus a `VirtualFree` closure.
+The `uintptr` -> `unsafe.Pointer` step that `go vet`'s `unsafeptr` flagged
+last time is gone: the address word is read back as a pointer
+(`*(*unsafe.Pointer)(unsafe.Pointer(&addr))`), which is vet-clean and
+checkptr-clean (`go test -race` over the whole astrobwt suite passes with
+large pages active). `carveV114Scratch` takes the region when present and a
+heap `[]byte` otherwise -- one carve, one layout test -- and registers
+`runtime.AddCleanup(v, release)` so `pkg/engine` restart loops cannot leak the
+off-heap region (the 22d198d concern). `-tags nolargepages` builds the heap
+path on Windows, which is also the A/B base. Tests: `TestLargePageRegionContract`
+(exact length, 2 MiB alignment, zeroed, writable, carve caps identical across
+backings, heap fallback where the right is absent -- every CI runner) and
+`TestLargePageCarveMatchesHeapHash`. Gates before any measured leg: vet at
+v1/v3 silent, astrobwt suite at v1/v3/v114stats/nolargepages, race,
+`V114_GATE_HASHES=1000008` million-hash 1000008/1000008 0 fallbacks,
+selftest PASS, `--sustained` reports `largepages=true` on this host.
+
+Run dirs: `bench-results/micro-couples/20260820-*`, `bench-results/thue-morse/20260820-*`
+(each with `analysis.txt`), profiles + diagnostics + provenance in
+`bench-results/pgo-refresh-20260820-064046/`. Ledger: `sandbox/ledger.tsv`
+campaign section. Vault: pre-registration, one benchmark note per block
+(`02-projects/go-miner/benchmarks/2026-08-20-*.md`), campaign log
+`go127-toolchain-pgo-campaign-2026-08-20.md`.
+
 ## Closed Questions
 
+- *Does a refreshed PGO profile help?* Yes at 1T, neutral at 20T, and it now
+  ships: 2026-08-20 fresh go1.27.0 profile +1.42% [+0.67, +2.18] on a P-core,
+  +0.49% [+0.10, +0.88] on an E-core, pooled 20T -0.26% [-0.82, +0.31] over two
+  blocks; retained under the relaxed gate (commit `ed9d2c7`). The earlier
+  refreshes (08-03 +0.73%/1T +0.17%/20T, 08-09 +1.22% [-1.78, +4.32], 08-09
+  x2 +0.77% LB +0.19%) were the same effect measured too loosely. The
+  mechanism is inlining structure (the comparator call sites), so the next
+  refresh is due when the hot call graph changes again, not on a calendar.
+- *Does Go 1.27's compiler change hashrate?* No: go1.26.5 -> go1.27.0 on
+  identical source is +0.16% [-0.29%, +0.61%] at 20T and +0.2% at 1T; the
+  backend diff trims ~1% of hot-path instructions with no BCE change and
+  leaves the PGO hot set identical. Adopted as maintenance.
+- *asyncpreemptoff, alignhot=0, pgoinline knobs, newinliner?* All null or
+  negative at 20T/1T (2026-08-20); `//go:debug` cannot even express
+  asyncpreemptoff. Closed.
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
   open AstroBWTv3 miner — vendors canonical libdivsufsort (`divsufsort.c`, `sssort.c`,
   `trsort.c`); it has no libsais. Same family as v114. SA gains must come from
@@ -1081,9 +1283,18 @@ release build sets a flag, the analysis leg has to set it too.
 - `go test -tags v114stats ./internal/astrobwt`
 - `go test -run=^$ -bench='BenchmarkHash(V114|PairV114|SAIS)$' -benchmem -count=5 ./internal/astrobwt`
 - `scripts\bench-matrix.ps1 -Candidate <name>` for sustained results.
+- Toolchain: go1.27.0 (CI `1.27.x`, release `1.27.0`) since 2026-08-20;
+  numbers measured under 1.26.5 are a different epoch (measured parity
+  +0.16% [-0.29%, +0.61%] at 20T, but do not bridge across it for anything
+  finer than that).
 - Retention (relaxed by the user, 2026-08-06; previously "at least 2% at
   either target"): keep a candidate that is provably positive at either
   target — one-sided 95% lower bound above the ~0.6% attribution floor on
   the paired instruments — provided the other target shows no demonstrated
   regression beyond 0.5% (point >= -0.5% and CI upper bound not below
   -0.5%). Correctness gates are unchanged and non-negotiable.
+- Micro screens get the same idle cooldown as sustained legs (>= 3 min after
+  any build, test burn or 20T block): on 2026-08-20 an identical-arms control
+  read -0.49% and a P-core-1 A/A read -0.62% when run minutes after a 20T
+  block. A marginal verdict is settled by ONE pre-registered replication
+  block pooled by inverse variance, never by re-running until it passes.
