@@ -13,7 +13,6 @@ package astrobwt
 // Any decline falls back to the SAIS backend for that hash.
 
 import (
-	"runtime"
 	"sync/atomic"
 	"unsafe"
 )
@@ -124,20 +123,12 @@ func newV114Scratch() *v114Scratch {
 // collector never scans a word in this region, which is legal only because no
 // pointer is ever stored in it.
 //
-// On Windows the base is a 2 MiB large-page region when the process holds
-// SeLockMemoryPrivilege and a plain heap []byte otherwise; the carve is the
-// same either way, so one layout test covers both backings.
-//
 // Segment identity is not durable past the first hash: radixSortRunsByStoredKey
 // swaps runs with radixTmp and mergeEqualKeyRuns swaps runLens with nextLens.
 // Both preserve containment, disjointness and caps, which is all any later
 // assertion may rely on.
 func carveV114Scratch() (*v114Scratch, []byte) {
-	base, release := largePageRegion(v114ScratchBytes)
-	if base == nil {
-		base = make([]byte, v114ScratchBytes)
-	}
-	c := v114Carver{base: base}
+	c := v114Carver{base: make([]byte, v114ScratchBytes)}
 
 	order := c.u32(v114OrderCap)
 	arena := c.u32(v114ArenaCap)
@@ -155,7 +146,7 @@ func carveV114Scratch() (*v114Scratch, []byte) {
 		panic("astrobwt: v114 scratch carve consumed the wrong number of bytes")
 	}
 
-	v := &v114Scratch{
+	return &v114Scratch{
 		order:    order[:0],
 		arena:    arena[:0],
 		runs:     runs[:0],
@@ -164,15 +155,7 @@ func carveV114Scratch() (*v114Scratch, []byte) {
 		mergePos: mergePos,
 		runLens:  runLens[:0],
 		nextLens: nextLens[:0],
-	}
-	if release != nil {
-		// A large-page region is not heap memory, so nothing frees it when
-		// the last slice dies; tie it to the scratch instead. Every slice
-		// into the region is a field of v and none is handed out past a
-		// hash, so the scratch becoming unreachable is the region's last use.
-		runtime.AddCleanup(v, func(f func()) { f() }, release)
-	}
-	return v, c.base
+	}, c.base
 }
 
 // buildStage5Flags is the port of build_v114_stage5_flags (sa_v114.zig):
