@@ -6,7 +6,9 @@ TEXT ·materializeOrigins(SB), NOSPLIT, $0-24
 	MOVQ dst+0(FP), AX
 	MOVQ src+8(FP), CX
 	MOVL count+16(FP), DX
-	VPBROADCASTD rel+20(FP), Y0
+	MOVL rel+20(FP), BX
+	MOVQ BX, X0
+	VPBROADCASTD X0, Y0
 loop:
 	VMOVDQU (CX), Y1
 	VPADDD Y0, Y1, Y1
@@ -66,7 +68,7 @@ unique_arena:
 	INCQ AX
 	JMP unique_loop
 unique_done:
-	MOVQ AX, ret0+64(FP)
-	MOVQ BX, ret1+72(FP)
+	MOVQ AX, nextGroup+64(FP)
+	MOVQ BX, nextOut+72(FP)
 	VZEROUPPER
 	RET
