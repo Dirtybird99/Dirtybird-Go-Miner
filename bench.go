@@ -243,7 +243,7 @@ func runSustained(threads, secs int, pin bool, backend astrobwt.Backend, pair bo
 	n := r.total.Load()
 	elapsed := lastTime.Sub(start)
 	hs := float64(n) / elapsed.Seconds()
-	fmt.Printf("%d hashes in %v = %.2f KH/s (%.1f H/s/thread)\n", n, elapsed.Round(time.Millisecond), hs/1000, hs/float64(threads))
+	fmt.Printf("%d hashes in %v = %.2f KH/s (%.1f H/s/thread) largepages=%v\n", n, elapsed.Round(time.Millisecond), hs/1000, hs/float64(threads), astrobwt.LargePagesActive())
 	printInstrumentationStats()
 	return 0
 }
