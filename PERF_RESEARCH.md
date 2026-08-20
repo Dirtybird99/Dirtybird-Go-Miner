@@ -974,9 +974,24 @@ one, plus two defects fixed:
 `bench-results/micro-couples/20260819-203732-carve`). A null inside the ~0.6%
 attribution floor, which is the expected and desired result -- contiguity alone
 should not move a 1-thread number, and 1T barely exercises the page walkers.
-`armsIdentical=False` confirmed before reading the number. **The 20T sustained
-leg has NOT been run** (the box was ~10% busy with background apps; per the
-2026-07-09 retraction, a contaminated sustained number is worse than none).
+`armsIdentical=False` confirmed before reading the number.
+
+**Sustained 20T, 8-leg Thue-Morse, 240 s legs (run later the same evening at
+5.7% mean idle load): +0.321%, 95% CI [-0.622%, +1.274%], one-sided 95% lower
+bound -0.404%** (drift-adjusted fit, df=4,
+`bench-results/thue-morse/20260819-212527-carve`). Also a null, and it does not
+clear the +0.6% retention gate. Both instruments agree: contiguity alone is
+worth nothing measurable, which is the expected result and leaves the 2 MiB
+page size as the whole of the +0.899%.
+
+**Read the medians and you get the wrong sign.** Raw medians were -0.208%; the
+drift-adjusted fit is +0.321%. The box ramped **+2.84% from leg 1 to leg 8**
+(24.6475 -> 25.3475 KH/s), an order of magnitude larger than the effect, and
+leg 1 was a base leg. The Thue-Morse order keeps the treatment orthogonal to
+the linear and quadratic drift terms, which is the entire point of using it --
+`bench-thue-morse.ps1` prints medians with an explicit note not to decide on
+them, and this run is a concrete example of why. Always run
+`analyze-thue-morse.py`; its `--selftest` recovers a planted +3.045% at df=4.
 
 **Safety, since a wrong suffix array is a wrong share.** Segment reservation goes
 through a bounds-checked reslice `base[off:off+n]`, which validates the whole
