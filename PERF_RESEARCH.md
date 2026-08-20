@@ -1007,6 +1007,35 @@ land on 4096-byte boundaries under plain `make()`, because they exceed 32 KiB an
 come from Go's large-object allocator. Only `order` (2080 B) was a small object.
 Do not spend a campaign on alignment.
 
+## 2026-08-19 the release-path asm had never been vet-checked
+
+`go vet ./...` passes in CI because `ci.yml:27` and `release.yml:63` run it with
+**no `GOAMD64` set**, which excludes every `//go:build amd64.v3` file from the
+build. `release.sh` ships `GOAMD64=v3`. So the two asm kernels that actually run
+in release binaries were never analyzed. Running it surfaced three asmdecl
+diagnostics in `sa_v114_materialize_amd64_v3.s`, all pre-existing on a clean
+HEAD, all now fixed (`cceb34c`):
+
+- `ret0+64(FP)` / `ret1+72(FP)` matched nothing: asmdecl names unnamed results
+  `ret`, `ret1`, `ret2` (`appendComponentsRecursive`), never `ret0`. The offsets
+  were right and `TestV114FastPaths` already asserted both values, so this was
+  cosmetic. Results are now named `nextGroup`/`nextOut`.
+- `VPBROADCASTD rel+20(FP)` read a 4-byte value into a 32-byte register;
+  asmdecl checks operand size against the declared type and does not model
+  broadcast. No stdlib `.s` broadcasts straight from `FP` -- the idiom loads
+  through a GPR first, which is now what this does, at the cost of one hoisted
+  move outside the loop.
+
+Byte-exactness verified at `GOAMD64=v3` (`TestMaterializeOriginsMatchesReference`,
+`materialize_padded_boundary`, the carve tests), with a positive control
+(broadcasting `count` instead of `rel`) failing both.
+
+**The generalisable finding is the gap, not the three fixes.** A vet invocation
+that does not set the build's own `GOAMD64` cannot see that build's assembly.
+Same shape as the two other blind spots found this session: the arm64 SA kernels
+that no CI leg executed, and the large-page carve that no CI leg reached. If a
+release build sets a flag, the analysis leg has to set it too.
+
 ## Closed Questions
 
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
