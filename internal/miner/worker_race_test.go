@@ -134,3 +134,110 @@ func TestWorkerStopsWhileJobIsInvalid(t *testing.T) {
 		t.Fatal("worker did not stop after cancellation")
 	}
 }
+
+// TestWorkerSubmitsVerifiableShares is the only place anything checks that a
+// submitted blob is the blob the worker actually hashed. Every other gate
+// stops at the hash function: the million-hash differential and --selftest
+// call Hash, never HashPair, and the churn test above asserts only that
+// shares arrive with a stamped epoch. That left the worker's two-lane branch
+// - the one every amd64 build takes since pairing became the default - with
+// no correctness gate at all, so a lane mix-up would surface as pool-side
+// rejects rather than as a red test.
+//
+// The check is deliberately end-to-end: decode what was submitted, re-run the
+// PoW over those exact bytes, and require it to meet the job's target. A blob
+// whose nonce does not belong to the hash that qualified it fails that, which
+// is precisely the lane-crossing failure mode. Nonce uniqueness and the
+// thread-id byte are checked alongside, and both pipelines run so the
+// assertions cannot be vacuous for one of them.
+func TestWorkerSubmitsVerifiableShares(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode")
+	}
+	for _, tc := range []struct {
+		name string
+		pair bool
+	}{{"x1", false}, {"x2", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			// 256 is low enough to yield shares in a second and high enough
+			// that both lanes winning the same iteration is ~1/65536, so a
+			// lane mix-up cannot hide behind a double win.
+			const difficulty = 256
+			const tid = 7
+
+			blob := make([]byte, MiniblockSize)
+			for i := range blob {
+				blob[i] = byte(i * 7)
+			}
+			blob[0] = 0x41 // miniblock version nibble the miner requires
+
+			st := &State{}
+			if _, err := st.SetJob(getwork.Job{
+				JobID:             "job-verify",
+				Blockhashing_blob: hex.EncodeToString(blob),
+				Difficultyuint64:  difficulty,
+				Height:            4242,
+			}); err != nil {
+				t.Fatalf("SetJob: %v", err)
+			}
+			target := ComputeTarget(difficulty)
+
+			submits := make(chan getwork.Submit, 256)
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				Run(ctx, tid, st, submits, nil, astrobwt.BackendV114, tc.pair)
+			}()
+
+			collected := make(chan []getwork.Submit, 1)
+			go func() {
+				var got []getwork.Submit
+				for s := range submits {
+					got = append(got, s)
+				}
+				collected <- got
+			}()
+
+			<-ctx.Done()
+			wg.Wait()
+			close(submits)
+			shares := <-collected
+
+			if len(shares) == 0 {
+				t.Fatalf("no shares submitted at difficulty %d in 4s (hashes=%d)", difficulty, st.TotalHashes.Load())
+			}
+
+			h := astrobwt.NewWithBackend(astrobwt.BackendV114)
+			seen := make(map[uint32]int, len(shares))
+			for i, s := range shares {
+				if s.JobID != "job-verify" {
+					t.Fatalf("share %d: JobID = %q, want job-verify", i, s.JobID)
+				}
+				raw, err := hex.DecodeString(s.Blob)
+				if err != nil {
+					t.Fatalf("share %d: blob is not hex: %v", i, err)
+				}
+				if len(raw) != MiniblockSize {
+					t.Fatalf("share %d: blob is %d bytes, want %d", i, len(raw), MiniblockSize)
+				}
+				if raw[47] != tid {
+					t.Fatalf("share %d: thread id byte = %d, want %d", i, raw[47], tid)
+				}
+				pow := h.Hash(raw)
+				if !MeetsTarget(&pow, &target) {
+					t.Fatalf("share %d: re-hashing the submitted blob does not meet the target; the submitted bytes are not the ones that were hashed (blob %s pow %x nonce %d)", i, s.Blob, pow, binary.BigEndian.Uint32(raw[43:47]))
+				}
+				nonce := binary.BigEndian.Uint32(raw[43:47])
+				if prev, dup := seen[nonce]; dup {
+					t.Fatalf("share %d repeats nonce %d already submitted as share %d", i, nonce, prev)
+				}
+				seen[nonce] = i
+			}
+			t.Logf("%s: %d shares, all re-verified against the target; hashes=%d", tc.name, len(shares), st.TotalHashes.Load())
+		})
+	}
+}

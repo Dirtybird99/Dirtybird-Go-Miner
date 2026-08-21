@@ -2,9 +2,66 @@ package astrobwt
 
 import (
 	stdsha256 "crypto/sha256"
+	"encoding/binary"
 	"math/rand"
 	"testing"
 )
+
+// TestPairKernelIsLiveOrSaysSo exists because every other test in this file
+// degrades silently. HashPair falls back to two Hash calls and
+// sha256Sum256Pair falls back to crypto/sha256 when the batched kernel is
+// unavailable, so on such a host the pair suite compares crypto/sha256
+// against itself, passes, and proves nothing about the kernel. This test
+// makes that state impossible to mistake for coverage: it skips with a loud
+// message instead of quietly passing, and the arm64 CI leg greps the
+// discriminator this logs.
+func TestPairKernelIsLiveOrSaysSo(t *testing.T) {
+	t.Logf("pairHashPossible=%v pairHashAvailable=%v", pairHashPossible, pairHashAvailable())
+	if !pairHashAvailable() {
+		t.Skip("the batched kernel is NOT available on this host: every pair test here " +
+			"degrades to crypto/sha256 and proves nothing about the two-lane path")
+	}
+}
+
+// TestHashPairProductionShape feeds HashPair the exact input the miner
+// produces and no other test does: two 48-byte blobs identical except for the
+// big-endian nonce at bytes 43..46. That shape matters because the two lanes
+// share one v114 scratch (see Hasher.HashPair); a stale carry-over between
+// lanes is likeliest to hide when the inputs are near-identical, since both
+// lanes would then return the same wrong digest and any lane-vs-lane check
+// would still agree. Comparing each lane against an independent Hash, and
+// requiring the two lanes to differ, catches both halves of that.
+func TestHashPairProductionShape(t *testing.T) {
+	if !pairHashAvailable() {
+		t.Skip("batched kernel unavailable: HashPair would degrade to two Hash calls")
+	}
+	for _, backend := range []Backend{BackendV114, BackendSAIS} {
+		hp := NewWithBackend(backend)
+		hs := NewWithBackend(backend)
+		var a, b [48]byte
+		rand.New(rand.NewSource(11)).Read(a[:])
+		a[0] = 0x41 // miniblock version nibble, as the daemon sends it
+		a[47] = 7   // thread id, as the worker stamps it
+		b = a
+		for nonce := uint32(1); nonce <= 64; nonce += 2 {
+			binary.BigEndian.PutUint32(a[43:47], nonce)
+			binary.BigEndian.PutUint32(b[43:47], nonce+1)
+			ga, gb := hp.HashPair(a[:], b[:])
+			if wa := hs.Hash(a[:]); ga != wa {
+				t.Fatalf("backend %v nonce %d: lane A %x != Hash %x", backend, nonce, ga, wa)
+			}
+			if wb := hs.Hash(b[:]); gb != wb {
+				t.Fatalf("backend %v nonce %d: lane B %x != Hash %x", backend, nonce+1, gb, wb)
+			}
+			if ga == gb {
+				t.Fatalf("backend %v nonce %d: both lanes returned %x for different nonces", backend, nonce, ga)
+			}
+			if a[47] != 7 || b[47] != 7 {
+				t.Fatalf("nonce write clobbered the thread id byte: a[47]=%d b[47]=%d", a[47], b[47])
+			}
+		}
+	}
+}
 
 // TestPairDifferentialVsSingle pins the multi-buffer SHA kernel itself
 // against crypto/sha256 over varied lengths, including block boundaries and
