@@ -127,3 +127,72 @@ func TestProbeCyclesPerBlock(t *testing.T) {
 		t.Fatalf("2-way slower than 1-way (%.2fx) - instrument or kernel is broken", speedup)
 	}
 }
+
+func probeBlocks2NoSched(state0 *[8]uint32, p0 *byte, state1 *[8]uint32, p1 *byte, nblocks int)
+
+// TestProbeScheduleCeiling prices the message schedule. The schedule-free
+// kernel produces a wrong digest on purpose; the assertion is on cycles, and
+// on the wrongness itself, so a copy-paste that accidentally kept the
+// schedule cannot pass silently.
+func TestProbeScheduleCeiling(t *testing.T) {
+	if !useSHANI {
+		t.Skip("no SHA-NI on this host")
+	}
+	bufA := make([]byte, probeBlocks*64)
+	bufB := make([]byte, probeBlocks*64)
+	for i := range bufA {
+		bufA[i] = byte(i * 131)
+		bufB[i] = byte(i*17 + 5)
+	}
+
+	// Negative control: the probe must NOT reproduce the real digest. Both
+	// lanes are checked separately, because deleting the schedule from one
+	// lane only would still change the pair and pass a combined test.
+	real0, real1 := sha256IV, sha256IV
+	sha256Blocks2NI(&real0, &bufA[0], &real1, &bufB[0], 4)
+	probe0, probe1 := sha256IV, sha256IV
+	probeBlocks2NoSched(&probe0, &bufA[0], &probe1, &bufB[0], 4)
+	if probe0 == real0 {
+		t.Error("lane A of the schedule-free probe matches the real kernel: the schedule was not removed")
+	}
+	if probe1 == real1 {
+		t.Error("lane B of the schedule-free probe matches the real kernel: the schedule was not removed")
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+
+	st0, st1 := sha256IV, sha256IV
+	full := func() { sha256Blocks2NI(&st0, &bufA[0], &st1, &bufB[0], probeBlocks) }
+	bare := func() { probeBlocks2NoSched(&st0, &bufA[0], &st1, &bufB[0], probeBlocks) }
+
+	// Warm the caches and the branch predictors before the first timed leg.
+	full()
+	bare()
+
+	const reps = 201
+	ta, tb := pairedTicks(reps, full, bare)
+
+	// Both arms cover the same block count over the same number of legs, so
+	// the per-rep tick ratio is already the per-block ratio.
+	shares := make([]float64, reps)
+	for i := range shares {
+		shares[i] = 100 * (1 - float64(tb[i])/float64(ta[i]))
+	}
+	slices.Sort(shares)
+	share := shares[len(shares)/2]
+
+	fullTPB := float64(medianU64(ta)) / float64(legsPerArm*probeBlocks)
+	bareTPB := float64(medianU64(tb)) / float64(legsPerArm*probeBlocks)
+
+	t.Logf("full 2-way:          %.1f TSC ticks/block-pair", fullTPB)
+	t.Logf("schedule-free 2-way: %.1f TSC ticks/block-pair", bareTPB)
+	t.Logf("message schedule = %.1f%% of kernel time (paired median of %d reps, IQR %.1f%%-%.1f%%)",
+		share, reps, shares[len(shares)/4], shares[3*len(shares)/4])
+	t.Log("the absolutes move with the core clock and do not reproduce across runs; " +
+		"the paired share does, and is the number to compare against")
+	t.Log("this share is an upper bound on what reordering the schedule could recover: " +
+		"the probe removes the schedule's dependency on the round chain along with its uops")
+	t.Log("DECISION: >= 15% -> schedule work is on the critical path, continue to the X0 funnel;" +
+		" < 15% -> the kernel is round-chain bound, close the surface")
+}
