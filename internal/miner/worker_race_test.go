@@ -159,12 +159,10 @@ func TestWorkerSubmitsVerifiableShares(t *testing.T) {
 		pair bool
 	}{{"x1", false}, {"x2", true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			// 256 is low enough to yield shares in a second and high enough
-			// that both lanes win the same iteration only ~1/65536 of the
-			// time. A cross-up can still hide behind an individual double
-			// win (conditional probability ~1/256), so the assertion rests on
-			// the run producing many shares, not on any single one.
-			const difficulty = 256
+			// Keep the test non-vacuous on slow -race runners. A crossed blob
+			// independently requalifies only ~1/8 of the time, so checking the
+			// many shares produced over this run still makes a lane mix-up fail.
+			const difficulty = 8
 			const tid = 7
 
 			blob := make([]byte, MiniblockSize)
