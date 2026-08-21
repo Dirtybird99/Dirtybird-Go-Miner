@@ -111,8 +111,9 @@ and [PERF_RESEARCH.md](PERF_RESEARCH.md).
 On Windows amd64 systems with up to 64 logical CPUs, topology-aware
 P-core-first pinning is on by default; `--pin=false` opts out. Larger Windows
 systems and other platforms stay unpinned unless requested. `--high` remains
-opt-in. The x2 `--pair` path remains opt-in on amd64 and defaults on only where
-the ARM SHA2 path has a measured win.
+opt-in. The x2 `--pair` path defaults on for ARM SHA2 and AMD SHA-NI hosts,
+where the interleaved final-hash path wins; it remains opt-in on Intel amd64.
+Use `--pair=false` for a controlled single-lane comparison.
 
 ## Build from source
 
@@ -122,9 +123,17 @@ Go 1.25+:
 GOAMD64=v3 go build -pgo=default.pgo -trimpath -ldflags "-s -w" -o go-miner .
 ```
 
-`GOAMD64=v3` and the committed PGO profile (`default.pgo`, collected on the
-mining workload) are the max-performance defaults on x86-64; both are optional.
-Cross-compile with the usual `GOOS`/`GOARCH`, e.g.
+For AMD Zen 4/5 processors exposing AVX-512, use the AMD-tuned build:
+
+```
+GOAMD64=v4 go build -pgo=default.pgo -trimpath -ldflags "-s -w" -o go-miner .
+```
+
+The v4 build enables the AVX-512 equal-column classifier; it requires an
+AVX-512-capable x86-64 CPU. `GOAMD64=v3` remains the portable x86-64 release
+baseline. The committed PGO profile (`default.pgo`, collected on the mining
+workload) is useful with either build. Cross-compile with the usual
+`GOOS`/`GOARCH`, e.g.
 `GOOS=linux GOARCH=arm64 go build .` — non-x86 targets use the portable
 fallbacks automatically. `scripts/release.sh vX.Y.Z` reproduces the full
 release asset set.

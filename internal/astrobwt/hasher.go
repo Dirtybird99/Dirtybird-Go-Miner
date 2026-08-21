@@ -65,8 +65,9 @@ func (h *Hasher) HashPair(a, b []byte) (ha, hb [32]byte) {
 }
 
 // PairHashSupported reports whether HashPair actually batches on this host
-// (multi-buffer SHA kernel present and usable). Callers use it to pick the
-// -pair default: on when batching wins by default (arm64), opt-in elsewhere.
+// (multi-buffer SHA kernel present and usable). The CLI uses it to enable
+// pair mode by default on ARM SHA2 and AMD SHA-NI hosts; Intel amd64 remains
+// opt-in because its high-thread tradeoff differs.
 func PairHashSupported() bool { return pairHashAvailable() }
 
 // Sum is a convenience for one-off hashing (KAT, selftest); it allocates a

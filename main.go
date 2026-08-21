@@ -66,13 +66,19 @@ func (o *options) backend() astrobwt.Backend {
 
 func validSAName(name string) bool { return name == "v114" || name == "sais" }
 
-// defaultPairMode: the 2-way batched final hash defaults on for arm64 with
-// the SHA2 extensions (family parity with the Rust miner — the interleaved
-// kernel wins on every ARM core measured) and stays opt-in on amd64, where
-// it costs ~1% at high thread counts from the doubled working set. An
-// explicit -pair=false always wins over the default.
+// defaultPairMode: the 2-way batched final hash defaults on where the
+// interleaved kernel wins: ARM SHA2 hosts and AMD SHA-NI hosts. AMD's two
+// independent SHA chains overlap well on Zen 5; Intel amd64 stays opt-in
+// because its shared SHA port and doubled working set can lose at scale.
+// An explicit -pair=false always wins over the default.
 func defaultPairMode() bool {
-	return runtime.GOARCH == "arm64" && astrobwt.PairHashSupported()
+	if !astrobwt.PairHashSupported() {
+		return false
+	}
+	if runtime.GOARCH == "arm64" {
+		return true
+	}
+	return runtime.GOARCH == "amd64" && cpuid.CPU.VendorID == cpuid.AMD
 }
 
 // defaultPinModeFor: pinning defaults on only where the affinity code can
@@ -193,7 +199,7 @@ advanced (benchmarking/tuning):
                          (pin defaults on for Windows amd64 up to 64 logical CPUs;
                           --pin=false disables)
   --pair                 2 nonces/thread with a 2-way batched final hash
-                         (default on arm64 with SHA2; --pair=false disables)
+                         (default on ARM SHA2 and AMD SHA-NI; --pair=false disables)
   --sa v114|sais         suffix-array backend (default v114)
   --dry-run / --debug / --cpuprofile <file>
 `, defaultDaemon)
@@ -303,8 +309,8 @@ func run() int {
 	} else {
 		cons.Logf("INFO", "Features: avx2 %s | avx512 %s | sha %s",
 			yesNo(cpuid.CPU.Supports(cpuid.AVX2)), yesNo(cpuid.CPU.Supports(cpuid.AVX512F)), yesNo(cpuid.CPU.Supports(cpuid.SHA)))
-		cons.Logf("INFO", "Fast path: SHA-NI build %s; AVX512 mining path No",
-			yesNo(cpuid.CPU.Supports(cpuid.SHA, cpuid.SSSE3, cpuid.SSE4)))
+		cons.Logf("INFO", "Fast path: SHA-NI build %s; AVX512 mining path %s",
+			yesNo(cpuid.CPU.Supports(cpuid.SHA, cpuid.SSSE3, cpuid.SSE4)), yesNo(astrobwt.AVX512MiningPath))
 	}
 	fmt.Fprintln(os.Stderr)
 
