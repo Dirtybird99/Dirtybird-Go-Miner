@@ -1376,9 +1376,9 @@ ratio.
 | 2-way `sha256Blocks2NI` | 52.3 | 107.9 | **1.29x** |
 | 2-way, per block-pair | 104.5 | 215.7 | - |
 
-The speedup is 1.29x at the median of 201 paired reps, IQR 1.29x-1.29x, and
-1.29x in each of the block's three runs. The inherited claim survives contact
-with an instrument. The derived column scales by a core:TSC ratio measured at
+The speedup is 1.29x at the median of 201 paired reps, IQR 1.25x-1.29x, and
+1.29x at the median of every run of the block. The inherited claim survives
+contact with an instrument. The derived column scales by a core:TSC ratio measured at
 2.0637 on this host (2.0164-2.0637 across the session; TSC 2.3008 GHz, implied
 core 4.75 GHz) and carries that ratio's uncertainty; it is corroboration, and
 nothing here depends on it.
@@ -1395,8 +1395,9 @@ One wrong-by-design probe then tested the leading explanation for that.
 staging, same loop structure, stale message words and so a deliberately wrong
 digest, which the test asserts lane by lane, so a copy that failed to remove
 the thing it was pricing fails loudly instead of reporting a quiet null.
-**The entire message schedule is 5.0% of 2-way kernel time** (IQR 4.9%-5.2%;
-5.0 / 5.1 / 5.0 across three runs, against a threshold ten points away). That
+**The entire message schedule is 5.0% of 2-way kernel time** (IQR 4.9%-5.2%,
+and the median came back at 5.0-5.1% in every run of the block, against a
+threshold ten points away). That
 5.0% is an upper bound on what reordering the schedule could recover, because
 deleting it removes its dependency edges along with its uops while a reordering
 would keep them.
