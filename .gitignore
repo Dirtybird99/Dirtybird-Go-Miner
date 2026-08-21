@@ -6,6 +6,7 @@ gm_*.exe
 exe_*.exe
 *.test.exe
 astro*.test.exe
+fakegetwork.exe
 dist/
 release/
 

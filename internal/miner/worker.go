@@ -23,9 +23,10 @@ const counterFlush = 16 // hashes between shared-counter flushes
 //
 // pair grinds two nonces per iteration through HashPair, batching both final
 // SHA-256s through the 2-way SHA-NI block (zig miner's 2-workers-per-thread
-// design). Measured +5%/hash at 1T but -2% at 20T on the i7-13700HX (the
-// shared SHA port saturates and the second scratch doubles the footprint),
-// so it is opt-in for low thread counts.
+// design). The lanes share one v114 scratch and run sequentially, so the
+// batched SHA is the whole difference: +3.8% at 20 threads and +1.4% at one
+// on the i7-13700HX, which is why it is the default wherever the kernel
+// exists.
 func Run(ctx context.Context, tid int, st *State, submits chan<- getwork.Submit, pinOrder []int, backend astrobwt.Backend, pair bool) {
 	runtime.LockOSThread()
 	if pinOrder != nil {

@@ -10,6 +10,13 @@
 // process (a wallet GUI/TUI), where a 2 GiB heap cap would fight the host
 // application. Callers wanting the CLI's steady-state behavior should keep
 // running go-miner as a binary instead.
+//
+// The module path is "go-miner", not a URL, so it cannot be resolved through
+// the module proxy. A host module points at a checkout instead:
+//
+//	require go-miner v0.0.0
+//
+//	replace go-miner => ../Dirtybird-Go-Miner
 package engine
 
 import (
@@ -46,10 +53,14 @@ var ErrBrokenHash = errors.New("AstroBWTv3 self-test failed; refusing to mine")
 // ErrInvalidConfig is returned by Start for an empty endpoint or wallet.
 var ErrInvalidConfig = errors.New("engine: endpoint and wallet are required")
 
-// DefaultPair mirrors the CLI default: 2-way batched final hashing on for
-// arm64 with SHA2 extensions, opt-in elsewhere.
+// DefaultPair mirrors the CLI default: 2-way batched final hashing on
+// wherever the interleaved kernel exists — arm64 with the SHA2 extensions and
+// amd64 with SHA-NI. The lanes run sequentially and share the ~2.8 MB v114
+// workspace, so pairing does not double the dominant working set; it does add
+// a second ScratchData (~0.5 MB of per-lane state) and batches both lanes'
+// final SHA-256 through the interleaved block.
 func DefaultPair() bool {
-	return runtime.GOARCH == "arm64" && astrobwt.PairHashSupported()
+	return astrobwt.PairHashSupported()
 }
 
 // DefaultBackendName is the suffix-array implementation used unless Config
@@ -59,9 +70,7 @@ const DefaultBackendName = "v114"
 
 func (c Config) backend() (astrobwt.Backend, error) {
 	switch c.Backend {
-	case "":
-		return astrobwt.BackendV114, nil
-	case "v114":
+	case "", DefaultBackendName:
 		return astrobwt.BackendV114, nil
 	case "sais":
 		return astrobwt.BackendSAIS, nil
@@ -101,8 +110,10 @@ type Config struct {
 	// pointer takes DefaultPair(); a non-nil one is honored either way, so a
 	// host can turn pairing off on arm64 the way the CLI's -pair=false does.
 	Pair *bool
-	// Pin enables P-core-first thread pinning where supported (Windows amd64
-	// <= 64 logical CPUs in v1; a no-op elsewhere).
+	// Pin enables physical-core-first thread pinning on supported Windows and
+	// Linux hosts. Pinning remains opt-in and is all-or-nothing for the worker
+	// set. Linux uses x/sys's fixed mask for CPU IDs below 1024; systems needing
+	// a larger mask safely run unpinned. This is independent of MaxThreads.
 	Pin bool
 	// Backend selects the suffix-array implementation; "" or "v114" selects
 	// the v1.14 descriptor SA, "sais" the reference SAIS. DefaultBackendName
@@ -228,7 +239,7 @@ func Start(ctx context.Context, cfg Config) (*Engine, error) {
 
 	var pinOrder []int
 	if cfg.Pin {
-		pinOrder = miner.PinOrder()
+		pinOrder = miner.PinOrder(cfg.Threads)
 	}
 	pair := e.pair() // resolved here: cfg.Pair points at the caller's memory
 	for t := 0; t < cfg.Threads; t++ {

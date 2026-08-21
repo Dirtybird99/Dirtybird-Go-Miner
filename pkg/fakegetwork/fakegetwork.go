@@ -78,7 +78,12 @@ type Config struct {
 	// JobEvery, when positive, loops the pass at this cadence instead of
 	// stopping after one pass. A zero value pushes once and holds.
 	JobEvery time.Duration
-	// OnSubmit, if set, is invoked for every submission received.
+	// OnSubmit, if set, is invoked for every submission received, from the
+	// reader goroutine of the connection that carried it. Each connection has
+	// its own reader, so a reconnecting client -- or two clients against one
+	// server -- would otherwise call this concurrently; the server serializes
+	// the calls, so an implementation may touch its own state without locking.
+	// Close waits for an in-flight call, so one that never returns hangs it.
 	OnSubmit func(Submission)
 }
 
@@ -96,6 +101,11 @@ type Server struct {
 	conns       map[*websocket.Conn]struct{}
 	closed      bool
 	handlers    sync.WaitGroup
+
+	// cbMu serializes onSubmit. Separate from mu so caller code never runs
+	// while the submissions lock is held, which would deadlock a callback
+	// that reads Submissions().
+	cbMu sync.Mutex
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -192,9 +202,12 @@ func (s *Server) addSubmission(sub Submission) {
 	s.mu.Lock()
 	s.submissions = append(s.submissions, sub)
 	s.mu.Unlock()
-	if s.onSubmit != nil {
-		s.onSubmit(sub)
+	if s.onSubmit == nil {
+		return
 	}
+	s.cbMu.Lock()
+	defer s.cbMu.Unlock()
+	s.onSubmit(sub)
 }
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {

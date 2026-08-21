@@ -3,6 +3,8 @@ package astrobwt
 import "testing"
 
 func TestV114FastPaths(t *testing.T) {
+	t.Logf("AVX512MiningPath=%v", AVX512MiningPath)
+
 	t.Run("equal columns", func(t *testing.T) {
 		data := make([]byte, 3<<8)
 		for i := 0; i < 1<<8; i++ {

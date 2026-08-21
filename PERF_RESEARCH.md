@@ -759,13 +759,784 @@ in-source rewrite touches. Closing it further needs hand-Go-asm on the inner
 loops (won't help the memory stalls) or a fundamentally lower-work SA
 decomposition than the whole miner family uses.
 
+## 2026-08-19 Go 1.27 `simd` assessed; arm64 SA kernels ported (correctness only)
+
+Go 1.27 shipped `simd` (portable, vector-size-agnostic) and `simd/archsimd`
+(arch-specific, revised amd64 API, new arm64 Neon). Both need
+`GOEXPERIMENT=simd` and neither is under the Go 1 compatibility promise.
+
+**amd64: no surface left, and the question is closed.** The vector-shaped
+kernels are already hand-written AVX2 (`sa_v114_equal_amd64_v3.s`,
+`sa_v114_materialize_amd64_v3.s`); `archsimd` on the comparator already measured
+1.59x slower; the radix scatter is memory-latency-bound with a twice-recorded
+null; `writeUniqueRunBatch` is already asm; and Raptor Lake has no AVX-512, so
+`VPCONFLICTD` and vector scatter are unavailable. Nothing was changed on amd64.
+
+**The portable package cannot express `buildEqualColumns` at all.** Its mask
+types expose only `And`, `Or`, `String`, and `ToIntNs` (`$GOROOT/src/simd/
+simd_stubs.go`); there is no movemask/bitmask extraction and no
+`AnyTrue`/`AllTrue`, so the `VPMOVMSKB` step has no portable spelling. Only
+`materializeOrigins` is expressible. That asymmetry is what selected hand asm.
+
+**arm64 was running the scalar path.** Both kernels were gated `!amd64.v3`, so
+every `linux/arm64`, `android-arm64`, and `darwin/arm64` release shipped scalar
+Go for work that is `+2.051%` and `+2.505%` on amd64. Ported both to hand-written
+Neon, no `GOEXPERIMENT`, no `go.mod` bump:
+
+- `sa_v114_materialize_arm64.s` — `VDUP` + two `VADD V.S4` per 32-byte block,
+  `VLD1.P`/`VST1.P`, same 8-element round-up the amd64 kernel relies on (the
+  `orderCap`/`arenaCap` `+8` padding already covers it).
+- `sa_v114_equal_arm64.s` — 16 `VMOVI $255` accumulators, `VCMEQ`+`VAND` over
+  eight 32-byte chunks per group, then per accumulator `VAND` with a
+  `[1,2,4,...,128]x2` weight vector and three self-`VADDP` rounds, which leaves
+  the 16-bit column mask in bytes 0-1; `VMOV V.S[0]` extracts it and four masks
+  are `ORR`-packed per output word. Byte-identical layout to the amd64
+  `VPMOVMSKB` path.
+- `sa_v114_uniquerun_stub.go` split out so the `!amd64.v3` stub is shared
+  instead of duplicated per architecture.
+
+**Correctness (arm64 verified under `qemu-aarch64-static`, byte-exactness only):**
+full `internal/astrobwt` suite green, including `TestV114DifferentialVsSAIS`,
+`TestDifferentialVsReference`, `TestV114FallbackRate`, `TestZeroAllocs`,
+`TestV114ZeroAllocsAfterWarmup`, and `TestV114MillionHashGate` at 20k hashes.
+amd64 `v1` and `v3` suites and the `v114stats` build unchanged and green.
+
+New `sa_v114_kernel_diff_test.go` gates both kernels against an in-test scalar
+reference: randomized over alphabets 1/2/3/16/256 and groupCounts 0-256, a
+one-differing-column-at-a-time sweep across all 256 columns, and a
+write-past-padding guard. It runs on every architecture, so it also re-validates
+the AVX2 kernels. **Positive controls:** `VADD`->`VSUB` in the materialize kernel
+and a one-bit shift error (`R6<<32` -> `R6<<33`) in the equal-columns packing
+both fail these tests on arm64. `TestV114FastPaths` also caught both, but it
+exercises a single fixed 3-group pattern, so it is not a sufficient gate for a
+16-accumulator kernel on its own.
+
+`.github/workflows/arm64-bench.yml` gained the four kernel gates (always) and
+the million-hash differential (`mode: smoke` only, so ~1M paired hashes never
+run immediately before a measured leg on a shared runner).
+
+**PERFORMANCE IS UNMEASURED.** qemu is correct for byte-exactness and worthless
+for throughput, which is exactly why `arm64-bench.yml` exists. No arm64 hashrate
+claim is made here and none should be quoted until that workflow has been
+dispatched against this change. The amd64 numbers above are the *motivation* for
+expecting a win, not evidence of one on Neon: `VPMOVMSKB` has no
+single-instruction Neon equivalent, so the equal-columns kernel in particular may
+land below its `+2.051%` amd64 figure.
+
+Two structural reasons to expect less than the amd64 figures, stated before
+measuring so a small number is not talked up afterwards. `VPMOVMSKB` has no
+single-instruction Neon equivalent (the weight-AND plus three `VADDP` rounds
+replace one instruction), and Neon is 128-bit against AVX2's 256-bit, so both
+kernels do twice the loop iterations per byte. `materializeOrigins` is the more
+exposed of the two: its hot call site is gated on `groupCount >= 4`
+(`sa_v114_emit.go:198`) while 1-3 group runs are 56.4% of the population, and
+the counts that do reach it are typically 4-8 -- a single Neon iteration, which
+is precisely where a 128-bit unit gives up the amd64 kernel's advantage. A null
+on Kernel A would be an unsurprising result, not a bug.
+
+## 2026-08-19 Go 1.27 amd64 re-probe -- three nulls, and the comparator explained
+
+Test-only probes under `GOEXPERIMENT=simd`, gated `//go:build goexperiment.simd
+&& amd64` in `sa_v114_simdprobe_amd64_test.go`, `sa_v114_cmpprobe_amd64_test.go`,
+and `sa_v114_lcpstats_amd64_test.go`. No production file, no `go.mod` bump, no CI
+change: `simd` is absent from `$GOROOT/api/*.txt` so vet's `stdversion` never
+fires, and the import compiles with the directive still at `go 1.25.0`. Negative
+control: with `GOEXPERIMENT` unset `go list` reports 0 of the 3 files, and the
+`v1`/`v3` suites are unchanged. Every probe carries an equality gate against the
+shipping kernel or `referenceEqualColumns`; all green.
+
+**Structural finding: the portable `simd` package dispatches per call.** Each
+function using it compiles to four clones -- `@simd0`, `@simd128`, `@simd256`,
+`@simd512` -- behind a trampoline that loads `simd.maxVectorSize`, compares
+against 0x80/0x100/0x200, and **CALLs** the clone (`go tool objdump` on
+`probeMaterializeSIMD`). It is not inlined and not devirtualized. `archsimd`
+emits one direct symbol with no dispatch. That difference alone disqualifies the
+portable package for small hot kernels.
+
+**Probe 1, `materializeOrigins` under portable `simd`** -- median ns/op,
+`GOMAXPROCS=1`, `-benchtime=3000000x -count=10`, judged counts 4/5/8:
+
+| n | asm | portable simd | scalar |
+|---|---|---|---|
+| 4 | 1.74 | 3.03 | 3.75 |
+| 5 | 1.55 | 2.89 | 3.16 |
+| 8 | 1.65 | 3.04 | 4.23 |
+| 512 (diag) | 19.4 | 36.0 | 104.3 |
+
+**~1.8x slower than the asm at every size.** It does beat scalar, so it would be
+the right tool on an architecture with no hand kernel, but the gap persists at
+n=512, so it is not only the trampoline.
+
+**Probe 2, `buildEqualColumns` under `archsimd`** -- judged group counts:
+
+| groups | asm | archsimd |
+|---|---|---|
+| 3 | 6.22 | 6.28 |
+| 4 | 8.44 | 8.71 |
+| 5 | 9.82 | 10.82 |
+| 8 | 16.18 | 18.44 |
+| 64 (diag) | 119.7 | 156.2 |
+
+Within 1-14% at the judged sizes and never faster. **Methodology warning for
+anyone re-running this:** the first revision held the eight mask accumulators in
+a `[8]archsimd.Mask8x32` array and measured **3.6x slower**. archsimd's own doc
+warns against putting vector types in aggregates; eight named variables
+recovered the entire gap. That first number was a bug in the probe, not a fact
+about archsimd.
+
+**Probe 3, the comparator -- the pre-registered judged arm was WRONG, and
+measuring it is what produced the answer.** The arm was first set to common
+prefixes {0,2,7,15} on the reading that "the walks are cheap". New
+`TestMeasureComparatorPrefixLengths` measured the actual population instead:
+100,557,233 equal-key adjacent suffix-array pairs drawn from 2000 real hashes
+via `astroBWTv3Stream`.
+
+**This is a proxy, not the comparator's exact call population.** It counts every
+adjacent SA pair sharing a 3-byte key -- roughly 50k per hash -- while `:246-256`
+puts the merge comparator at ~331 groups over ~1500-1700 records per hash, and
+`constantRunOrder` short-circuits 99.98% of large literal groups without calling
+it at all. So the sample is ~30x broader and over-represents exactly the
+repeated-byte runs the closed form removes. The null is insensitive to any
+reweighting because the kernel wins or ties at **both** ends of the sweep
+(1.72-1.84 vs archsimd 3.31-3.40 below 8 bytes, and 2.6x at 4096).
+
+| common prefix after the 3-byte key | share |
+|---|---|
+| <8 (the BE-u64 word resolves) | 7.50% |
+| 8-31 | 17.21% |
+| 32-63 | 19.36% |
+| 64-255 | 53.42% |
+| >=256 | 2.51% |
+
+Mean **96.15 bytes**, and **75.29%** are long enough for a 32-byte scan to
+reach. The judged arm was moved to {32,64,96,128} on this evidence before
+re-benchmarking. Two arms were tried: a pure archsimd single-pass scan, and a
+hybrid keeping the shipping big-endian word and replacing only the
+`bytes.Compare` tail.
+
+| common | kernel | hybrid | archsimd |
+|---|---|---|---|
+| 32 | 4.74 | 4.53 | 4.59 |
+| 64 | 5.61 | 5.91 | 6.08 |
+| 96 | 5.33 | 6.88 | 8.85 |
+| 128 | 6.61 | 7.62 | 8.11 |
+| 256 (2nd) | 7.56 | 11.64 | 12.88 |
+| 4096 (diag) | 66.6 | 151.5 | 172.8 |
+
+c64/c96/c128 were re-measured at `-benchtime=8000000x -count=21` after the first
+pass looked non-monotonic; kernel c96 replicates tightly at 5.33 (range
+4.95-5.65) and really is faster than kernel c64 at 5.61, presumably a size-class
+branch inside the runtime's memcmp. Recorded as measured rather than smoothed.
+
+Parity at c32-c64, the kernel **wins by 29% at c96 and 15% at c128** where the
+distribution actually sits, and the kernel is **2.6x faster** once prefixes get
+long. **Mechanism: the comparator was never a scalar loop.** Its tail is
+`bytes.Compare`, which is the Go runtime's hand-tuned AVX2 memcmp with wide
+unrolled strides; a straightforward 32-byte archsimd loop cannot approach it.
+This also *explains* rather than contradicts `:466-470` -- the walks are long
+but cheap precisely because the runtime already vectorises them, which is why
+per-call overhead dominated the +5.4%.
+
+**No escalation.** The pre-registered trigger was parity-or-better on the judged
+arm; nothing met it, so no candidate was built and no sustained instrument was
+run. The probes are kept as test-only files: they cost nothing in a normal build
+and they are the evidence for the closed question below. They are **pinned to the
+1.27 `archsimd` API**, which is outside the Go 1 compatibility promise and is
+expected to move in 1.28, so the next person to set `GOEXPERIMENT=simd` should
+expect to fix them up or delete them rather than trust that they still build.
+
+## 2026-08-19 v114 scratch carved from one contiguous region -- micro NULL, kept
+
+`newV114Scratch` allocated eight separate buffers with `make()`. It now
+allocates ONE `[]byte` and carves all eight out of it (`sa_v114.go`,
+`carveV114Scratch`). Construction allocations drop 8 -> 1; the per-hash path is
+untouched.
+
+**Why, given the null.** This is not a speed change, it is the prerequisite for
+one, plus two defects fixed:
+
+- The reverted large-page allocator (`8796f4a`) had **two divergent construction
+  paths** -- a carve out of the VirtualAlloc region and eight `make()`s. CI never
+  holds `SeLockMemoryPrivilege`, so only the `make()` branch ever ran and the
+  carve's hand-counted byte offsets shipped with **zero test coverage**. One path
+  means every CI leg now executes it.
+- The region was deliberately never freed. Fine for a process-lifetime miner,
+  wrong for `pkg/engine`: `Start` creates `Threads+1` Hashers and `Stop`
+  (`engine.go:293-296`) releases none, so a pool-failover restart loop leaked
+  ~2.8 MiB per thread per cycle with `MaxThreads = 255`. A GC-tracked `[]byte`
+  dies with its Hasher.
+- It **isolates contiguity from 2 MiB page size**. The +0.899% at
+  `:691-719` conflated them; large pages are now a one-line swap of the
+  `make([]byte, v114ScratchBytes)` over a carve that is already tested.
+
+**Micro screen: +0.009%, 95% CI [-0.458%, +0.477%]**, one-sided lower bound
+-0.377% (20 couples, affinity 0x1, `-pgo=default.pgo`, GOAMD64=v3,
+`bench-results/micro-couples/20260819-203732-carve`). A null inside the ~0.6%
+attribution floor, which is the expected and desired result -- contiguity alone
+should not move a 1-thread number, and 1T barely exercises the page walkers.
+`armsIdentical=False` confirmed before reading the number.
+
+**Sustained 20T, 8-leg Thue-Morse, 240 s legs (run later the same evening at
+5.7% mean idle load): +0.321%, 95% CI [-0.622%, +1.274%], one-sided 95% lower
+bound -0.404%** (drift-adjusted fit, df=4,
+`bench-results/thue-morse/20260819-212527-carve`). Also a null, and it does not
+clear the +0.6% retention gate. Both instruments agree: contiguity alone is
+worth nothing measurable, which is the expected result and leaves the 2 MiB
+page size as the whole of the +0.899%.
+
+**Read the medians and you get the wrong sign.** Raw medians were -0.208%; the
+drift-adjusted fit is +0.321%. The box ramped **+2.84% from leg 1 to leg 8**
+(24.6475 -> 25.3475 KH/s), an order of magnitude larger than the effect, and
+leg 1 was a base leg. The Thue-Morse order keeps the treatment orthogonal to
+the linear and quadratic drift terms, which is the entire point of using it --
+`bench-thue-morse.ps1` prints medians with an explicit note not to decide on
+them, and this run is a concrete example of why. Always run
+`analyze-thue-morse.py`; its `--selftest` recovers a planted +3.045% at df=4.
+
+**Safety, since a wrong suffix array is a wrong share.** Segment reservation goes
+through a bounds-checked reslice `base[off:off+n]`, which validates the whole
+extent -- strictly stronger than the prior art's `&base[off]`, which checked only
+the first byte and would let `unsafe.Slice` fabricate a 283 KB segment over one
+valid byte. Element counts are stated once (`u32(n)`/`run(n)` derive bytes), and
+an end-of-carve equality assertion catches a future ninth buffer. Sizes come from
+`unsafe.Sizeof`, not the old `(8+8+4+4+4+4)` literal. No `uintptr` appears, so
+`unsafeptr` -- the analyzer that caused the revert -- has nothing to flag.
+
+New `sa_v114_carve_test.go` (no build tags, every platform and CI leg): layout,
+a tagged no-aliasing fill at full cap, and containment re-checked after 200 real
+hashes -- the last asserts only order-independent properties because
+`radixSortRunsByStoredKey` swaps `runs`/`radixTmp` and `mergeEqualKeyRuns` swaps
+`runLens`/`nextLens`. **Positive controls:** reusing an offset, under-sizing the
+budget by one cache line, and dropping the 64-byte rounding each fail these
+tests; the aliasing test names the culprit
+(`order[0] ... tag 1, clobbered by segment tag 8`).
+
+Gates: vet; `go test` at `GOAMD64=v1` and `v3`; `-tags v114stats`;
+`go test -race`; cross-builds for linux/darwin/android arm64 and the build-only
+s390x leg; and the full arm64 suite under `qemu-aarch64-static` reporting
+`V114 GATE: 20016/20000 hashes matched, 0 fallbacks`.
+
+**One measured hypothesis retired.** The old "64-byte aligned" justification buys
+nothing: over 200 allocations at `GOAMD64=v3`, seven of the eight buffers already
+land on 4096-byte boundaries under plain `make()`, because they exceed 32 KiB and
+come from Go's large-object allocator. Only `order` (2080 B) was a small object.
+Do not spend a campaign on alignment.
+
+## 2026-08-19 the release-path asm had never been vet-checked
+
+`go vet ./...` passes in CI because `ci.yml:27` and `release.yml:63` run it with
+**no `GOAMD64` set**, which excludes every `//go:build amd64.v3` file from the
+build. `release.sh` ships `GOAMD64=v3`. So the two asm kernels that actually run
+in release binaries were never analyzed. Running it surfaced three asmdecl
+diagnostics in `sa_v114_materialize_amd64_v3.s`, all pre-existing on a clean
+HEAD, all now fixed (`cceb34c`):
+
+- `ret0+64(FP)` / `ret1+72(FP)` matched nothing: asmdecl names unnamed results
+  `ret`, `ret1`, `ret2` (`appendComponentsRecursive`), never `ret0`. The offsets
+  were right and `TestV114FastPaths` already asserted both values, so this was
+  cosmetic. Results are now named `nextGroup`/`nextOut`.
+- `VPBROADCASTD rel+20(FP)` read a 4-byte value into a 32-byte register;
+  asmdecl checks operand size against the declared type and does not model
+  broadcast. No stdlib `.s` broadcasts straight from `FP` -- the idiom loads
+  through a GPR first, which is now what this does, at the cost of one hoisted
+  move outside the loop.
+
+Byte-exactness verified at `GOAMD64=v3` (`TestMaterializeOriginsMatchesReference`,
+`materialize_padded_boundary`, the carve tests), with a positive control
+(broadcasting `count` instead of `rel`) failing both.
+
+**The generalisable finding is the gap, not the three fixes.** A vet invocation
+that does not set the build's own `GOAMD64` cannot see that build's assembly.
+Same shape as the two other blind spots found this session: the arm64 SA kernels
+that no CI leg executed, and the large-page carve that no CI leg reached. If a
+release build sets a flag, the analysis leg has to set it too.
+
+## 2026-08-20 Go 1.27.0 toolchain (Q1 parity), PGO refresh under 1.27 (Q2 RETAINED), follow-on arms
+
+Go 1.27.0 has been the local toolchain since 2026-08-18 while CI pinned 1.26.x
+and release.yml pinned 1.26.5, so every release binary and every sustained
+number before this entry is a 1.26.5 artifact. This entry moves the floor
+(`go.mod` 1.25.0 -> 1.27.0, the five workflow pins, README/SECURITY/script.sh)
+and measures what the move could change: the toolchain itself (Q1), the
+profile it compiles against (Q2), and four opted-in follow-on arms (E1-E3,
+E5; E4 was conditional on a Q1 regression that did not happen). Every block
+was pre-registered in the vault (`02-projects/go-miner/go127-prereg-2026-08-20.md`)
+before it ran, including the two replication rules below.
+
+**What 1.27 changes for this code.** The release notes have nothing for a
+zero-alloc, asm-adjacent hot loop: the size-specialized allocator never runs
+per hash, `simd`/`archsimd` were re-probed null on 2026-08-19, and the hot
+runtime primitives (`memmove_amd64.s`, `bytealg/compare_amd64.s`,
+`equal_amd64.s`, `indexbyte_amd64.s`) are byte-identical between 1.26.6 and
+1.27.0. The unlisted backend work is what could move it: new `known bits` and
+`loop invariant` SSA passes, a generalized `loopbce`, the regalloc `regMask`
+rewrite, CSE of loads across non-aliasing stores, and new generic/AMD64 rules
+(carry/borrow via `SETB`, flags->bool->flags round-trip removal). Measured on
+this package at v3 + the old `default.pgo`: hot-path text 9,589 -> 9,494
+instructions over the 12 hot functions (`go tool objdump`); `astroBWTv3Stream`
+-69 (the op kernel loses most of its `PUSHFQ` flag spills), `buildSAv114` -16,
+`writeFusedRunsToSA` -15, `mergeEqualKeyRuns` -13, `tryWriteTwoRuns` **+17**
+(LICM hoists two `ANDL` masks into spills; `-d=ssa/loop_invariant/off`
+restores it and touches nothing else). `-d=ssa/check_bce/debug=1`: **400
+remaining bounds checks under both toolchains, identical per file.** Inliner
+budgets and PGO thresholds are unchanged; `-d=pgodebug=1` with the old
+profile gives the same 19 hot functions, 12 hot-budget inlines and 2 hot-big
+refusals (`hot-callsite-thres-from-CDF=0.0929`) under 1.26.5 and 1.27.0. Prior
+for Q1, stated before measuring: |delta| <~ 0.5%, sign unknown. The go.mod
+directive bump itself changes no codegen: the hot-function instruction
+streams of `internal/astrobwt` test binaries built under `go 1.25.0` and
+`go 1.27.0` are identical (9,830 instructions); only the main package's
+`DefaultGODEBUG` string differs (the 1.25 set
+`cryptocustomrand=1,tlssecpmlkem=0,urlstrictcolons=0` goes away; none of the
+1.27 defaults touches a path this miner exercises).
+
+**Why Q2 had a positive prior.** `default.pgo` was captured 2026-07-08 (122 s,
+20T) and never regenerated. `appendOrderGroup` (5.44% flat / 8.34% cum) and
+`radixOrderKey` (1.46%) no longer exist, so ~7% of its flat weight was
+orphaned; it predated the AstroX campaign, so `constantRunOrder`,
+`buildEqualColumns`, `materializeOrigins` and `writeUniqueRunBatch` carried no
+weight; and `suffixLessAfterKey` was never inlined into its callers. Earlier
+refreshes: 2026-08-03 +0.73%/1T, +0.17%/20T (4-leg 45 s protocol); 2026-08-09
++1.22% [-1.78, +4.32]; 2026-08-09 x2 +0.77%, LB +0.19%.
+
+**Arms.** Source `f8f5ac2`, `go.mod` left at 1.25.0 for the Q1/Q2 arms,
+`GOAMD64=v3`, `CGO_ENABLED=0`, `-trimpath -ldflags "-s -w"`; Q1 base built with
+`GOTOOLCHAIN=go1.26.5` (the release pin), everything else go1.27.0. Fresh
+profile: `gm_go1270_default.exe --sustained --secs 120 -t 20 --sa v114
+--pair=false --pin --high --cpuprofile` (24.79 KH/s steady; sha256
+`aad3ab999c134daa...`), the same shape as the old profile's provenance; a
+merged 20T+1T variant was screened and not promoted. Every arm's `go version
+-m` first line and sha256 are in `env.txt` of each run dir;
+`armsIdentical=False` on every judged block, and a deliberate identical-arms
+control block made the detector fire (`armsIdentical=True`). Layout-null A/A
+arm = one unused `//go:noinline` func kept alive through a package var (an
+unreferenced one is dead-stripped and yields a byte-identical binary).
+
+**20T Thue-Morse (8 legs x 240 s + discarded warm-up, drift-adjusted fit, df=4):**
+
+| block | point | SE | 95% CI | one-sided LB | drift |
+|---|---:|---:|---|---:|---:|
+| A/A layout-null | +0.220% | 0.50 pp | [-1.147%, +1.605%] | -0.831% | +0.39%/leg |
+| Q1 go1.26.5 -> go1.27.0 | **+0.160%** | 0.16 pp | **[-0.292%, +0.614%]** | -0.187% | -0.98%/leg |
+| Q2 default.pgo -> fresh, block 1 | -0.441% | 0.38 pp | [-1.492%, +0.622%] | -1.249% | +0.50%/leg |
+| Q2 default.pgo -> fresh, block 2 (pre-registered replication) | -0.130% | 0.32 pp | [-1.009%, +0.755%] | -0.806% | +0.07%/leg |
+| **Q2 pooled (inverse-variance, df=8)** | **-0.257%** | 0.24 pp | **[-0.818%, +0.306%]** | -0.710% | |
+| E1 asyncpreemptoff=1 | -0.007% | 0.34 pp | [-0.945%, +0.941%] | -0.728% | +0.17%/leg |
+| E2 large pages, block 1 | +0.460% | 0.63 pp | [-1.269%, +2.219%] | -0.871% | +0.34%/leg |
+| E2 large pages, block 2 (pre-registered replication) | -0.133% | 0.24 pp | [-0.793%, +0.532%] | -0.640% | +0.40%/leg |
+| **E2 pooled (inverse-variance, df=8)** | **-0.058%** | 0.22 pp | **[-0.571%, +0.458%]** | -0.472% | |
+| E3 `-d=alignhot=0` | -0.316% | 0.12 pp | [-0.659%, +0.029%] | -0.580% | +0.60%/leg |
+
+Steady rates 24.7-25.5 KH/s on every arm (the session's absolute level; not
+comparable to other days). The A/A sits inside the instrument-OK band at the
+upper edge of the SE range (0.5 pp).
+
+**1T micro (20 couples, 600x; P-core 0x1 / E-core 0x10000):**
+
+| block | point | 95% CI | one-sided LB |
+|---|---:|---|---:|
+| A/A layout-null, P (06:38 / post-idle 09:02) | +0.346% / +0.137% | [-0.565, +1.264] / [-0.432, +0.709] | -0.407% / -0.333% |
+| Q1 go1.26.5 -> go1.27.0, P / E | +0.233% / +0.186% | [-0.789, +1.265] / [-0.189, +0.562] | -0.612% / -0.124% |
+| **Q2 fresh vs default.pgo, P / E (post-idle)** | **+1.419% / +0.489%** | **[+0.667, +2.175] / [+0.104, +0.876]** | **+0.798% / +0.171%** |
+| Q2 (06:47 contaminated window), P / E | +1.623% / +0.548% | [+0.193, +3.074] / [-0.358, +1.462] | screen only |
+| Q2 merged 20T+1T profile, P | +1.335% | [+0.196, +2.487] | screen only |
+| ref -pgo=off -> default.pgo / -> fresh, P | +1.042% / +0.671% | [-0.721, +2.837] / [-0.542, +1.900] | -0.417% / -0.332% |
+| E2 large pages (vs `-tags nolargepages`), P / E | +0.888% / +0.200% | [+0.108, +1.674] / [-0.116, +0.516] | +0.243% / -0.061% |
+| E3 `-d=alignhot=0` / `pgoinlinecdfthreshold=95` / `pgoinlinebudget=4000` / `GOEXPERIMENT=newinliner`, P | -0.167% / **-0.681%** / -0.506% / -0.181% | [-0.891, +0.562] / [-1.250, -0.110] / [-1.300, +0.295] / [-1.193, +0.842] | all below floor |
+| identical-arms control (same exe both arms, 10:02) | -0.493% | [-1.342, +0.362] | detector fired |
+
+Two protocol findings of the day, recorded because they change how the
+numbers above must be read. (1) The 06:47-06:50 micro window was
+non-stationary: those blocks ran 90 s after the arm builds and ~5 min after
+the 20T profile capture, a P-core-1 (`0x4`) re-screen minutes later gave A/A
+-0.62% [-1.45%, +0.21%] with ~18% within-block ns/op swings, and the three
+PGO pairs from the window are not transitive; the post-idle 09:02 re-run is
+the evidence, the 06:47 rows are screens. (2) The E micro screens at 10:02
+ran right after a 20T block and the identical-arms control in that window
+read -0.49% -- same lesson, so the E2/E3 micro rows are screens too. Micro
+screens need the same idle cooldown as legs; it is now written into the
+gates below.
+
+**Decisions.**
+- **Q1: parity -> Go 1.27 adopted** (commits `302e137` build: toolchain
+  floor; `35be37b` ci: workflow pins). The tightest block of the session puts
+  the 1.26.5 -> 1.27.0 delta at +0.16% with a +/-0.45 pp CI -- exactly the
+  prior. No throughput claim attaches to the toolchain; arm64-bench.yml's
+  pin bump starts a new measurement epoch there.
+- **Q2: RETAINED, fresh profile committed as `default.pgo` (`ed9d2c7`).** At
+  1T the fresh profile is real and above the floor (P-core LB +0.798%); at 20T
+  the two independent blocks pool to -0.257% [-0.818%, +0.306%], i.e. no
+  demonstrated regression (point and CI upper above -0.5%). The relaxed gate
+  keeps it; the pooling rule was fixed in the vault before block 2 ran, after
+  block 1 alone had put the "no regression" clause on a 0.06 pp margin.
+  Mechanism, from `-d=pgodebug=1`: threshold 0.0929 -> 0.0883, hot functions
+  19 -> 22, hot-budget inlines 12 -> 33 -- `suffixLessAfterKey` (cost 337) is
+  now inlined into `mergeSortedPositionsAfterKey`, `tryWriteLiteralGroup` and
+  `tryWriteTwoRuns`, and `constantRunOrder`, `appendOriginGroup`,
+  `mergeEqualKeyRuns` and the emit family into their callers. That is the
+  per-call comparator overhead the 2026-08-06 campaign bounded (+1.25% for the
+  walk alone, +4.1 pp per-call share of the +5.4% ceiling), captured by the
+  profile instead of by hand, and a compute-bound 1T win not transferring to
+  20T is the documented pattern here. `-pgo=off` -> old profile screened at
+  +1.0% [-0.7, +2.8] and -> fresh at +0.7% [-0.5, +1.9] in the contaminated
+  window: PGO is worth about a percent at 1T whichever profile drives it.
+- **E5 (inline-header comparator): not built.** The pre-registered gate was
+  "check whether the fresh profile already inlines the comparator"; it does,
+  at all three call sites. Nothing is left for a hand-inlined header to
+  recover. Closed.
+- **E1 (`asyncpreemptoff=1`): null, closed.** `//go:debug asyncpreemptoff=1`
+  is rejected by the go command (runtime-only GODEBUG, not in the go:debug
+  table); the arm was built with what the directive compiles to,
+  `-ldflags=-X=runtime.godebugDefault=asyncpreemptoff=1` (the runtime's own
+  `parsegodebug` applies it; string-proofed: `asyncpreemptoff=1` present in
+  the cand binary, absent in base). -0.007% [-0.945%, +0.941%] at 20T. The
+  10 ms sysmon handoff itself is not removable by GODEBUG.
+- **E3 compile knobs: all closed.** `-d=alignhot=0` is slightly negative at
+  20T (-0.316% [-0.659%, +0.029%], SE 0.12 pp) -- PGO hot-block alignment is
+  worth keeping; `pgoinlinecdfthreshold=95` regresses at 1T (-0.68%
+  [-1.25%, -0.11%]); `pgoinlinebudget=4000` leans negative; `newinliner`
+  null. Shipping any of them would also have needed a `-gcflags` line in
+  release.sh/build-release.ps1.
+- **E2 (2 MiB large pages, vet-clean re-implementation of 8796f4a): not
+  shipped.** Block 1 read +0.46% with the widest CI of the day (SE 0.63 pp),
+  which put the verdict on the instrument rather than on the arm, so one
+  replication was pre-registered with the rule "ship iff the pooled 20T LB
+  clears +0.6%". Block 2: -0.133% [-0.793%, +0.532%]; pooled -0.058%
+  [-0.571%, +0.458%], LB -0.472%. The 2026-08-13 +0.899% (every leg positive)
+  does not reproduce in this epoch: that figure came from the pre-carve tree
+  under 1.26.5, and nothing in the mechanism argument survives a null this
+  tight -- the radix passes stream the same 4 KiB of records per hash
+  whichever way the pages are mapped, and the per-thread working set already
+  sits inside L2. Committed as `fc15ec9` and reverted in the following
+  commit, so the vet-clean allocator is one `git revert` away for a host or
+  epoch where page walks are back on the profile. Dead end until then.
+
+**E2 implementation notes (what is on the branch regardless of the verdict).**
+`largepage_windows.go` (`//go:build windows && !nolargepages`) enables
+`SeLockMemoryPrivilege` best-effort, lets `VirtualAlloc(MEM_LARGE_PAGES)`
+adjudicate, and returns the region as `[]byte` plus a `VirtualFree` closure.
+The `uintptr` -> `unsafe.Pointer` step that `go vet`'s `unsafeptr` flagged
+last time is gone: the address word is read back as a pointer
+(`*(*unsafe.Pointer)(unsafe.Pointer(&addr))`), which is vet-clean and
+checkptr-clean (`go test -race` over the whole astrobwt suite passes with
+large pages active). `carveV114Scratch` takes the region when present and a
+heap `[]byte` otherwise -- one carve, one layout test -- and registers
+`runtime.AddCleanup(v, release)` so `pkg/engine` restart loops cannot leak the
+off-heap region (the 22d198d concern). `-tags nolargepages` builds the heap
+path on Windows, which is also the A/B base. Tests: `TestLargePageRegionContract`
+(exact length, 2 MiB alignment, zeroed, writable, carve caps identical across
+backings, heap fallback where the right is absent -- every CI runner) and
+`TestLargePageCarveMatchesHeapHash`. Gates before any measured leg: vet at
+v1/v3 silent, astrobwt suite at v1/v3/v114stats/nolargepages, race,
+`V114_GATE_HASHES=1000008` million-hash 1000008/1000008 0 fallbacks,
+selftest PASS, `--sustained` reports `largepages=true` on this host.
+
+Run dirs: `bench-results/micro-couples/20260820-*`, `bench-results/thue-morse/20260820-*`
+(each with `analysis.txt`), profiles + diagnostics + provenance in
+`bench-results/pgo-refresh-20260820-064046/`. Ledger: `sandbox/ledger.tsv`
+campaign section. Vault: pre-registration, one benchmark note per block
+(`02-projects/go-miner/benchmarks/2026-08-20-*.md`), campaign log
+`go127-toolchain-pgo-campaign-2026-08-20.md`.
+
+## 2026-08-21 Thread sweep (E0), arXiv/go.dev lever hunt, and the x2 default (E9)
+
+Two questions closed on one idle box: where the Go miner's scaling actually
+bends, and whether the literature has anything left for the hot loops. The
+sweep answered the first with numbers and turned up the session's only real
+win, which had nothing to do with the literature.
+
+**E0 -- the thread sweep the miner never had.** `scripts/bench-thread-sweep.ps1`
+(new) runs each arm as a cold 60 s `--sustained` leg at 1/2/4/8/12/16/20
+threads, mirror order per point (`go-x1 go-x2 zig-x2 zig-x2 go-x2 go-x1`), 30 s
+cooldowns, stray check before every leg, per-logical-processor Actual Frequency
+sampled throughout; median of the two legs per (arm, threads).
+
+| threads | go-x1 KH/s | eff vs 1T | go-x2 KH/s | eff vs 1T | x2 vs x1 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 2.115 | 100.0% | 2.145 | 100.0% | +1.4% |
+| 2 | 4.115 | 97.3% | 4.380 | 102.1% | +6.4% |
+| 4 | 7.525 | 88.9% | 7.955 | 92.7% | +5.7% |
+| 8 | 12.565 | 74.3% | 12.545 | 73.1% | -0.2% |
+| 12 | 17.715 | 69.8% | 19.560 | 76.0% | +10.4% |
+| 16 | 24.000 | 70.9% | 24.805 | 72.3% | +3.4% |
+| 20 | 25.355 | 59.9% | 26.350 | 61.4% | +3.9% |
+
+Three readings. (1) **There is no E-cluster cliff in this miner.** x1
+efficiency *rises* across 12->16T, the step where all eight E-cores engage and
+where the Zig sibling lost 11 pp in 2026-08 before its working set was halved.
+The pre-registered trigger for an SoA radix restructure (a Go-only drop >= 5 pp
+there) never fired, so that candidate is closed unbuilt -- consistent with the
+two nulls that bracket it (shared scratch +0.26%, large pages pooled -0.06%):
+the hot set already fits. (2) **The largest step is 4->8T** (-14.6 pp), when the
+P-cores fill, not when the E-cores do; the same step appears in the other arm.
+(3) **16->20T costs -11.0 pp**: the four SMT siblings add 1.355 KH/s, 339 H/s
+each against a 1,500 H/s average, i.e. a sibling is worth ~23% of a primary.
+They are still worth taking -- 20T beats 16T by +5.6% (x1) / +6.2% (x2) -- which
+answers the "quiet 16T operating point" question in the negative.
+
+Two cautions travel with the table. The Zig column (`bench2_pgo.exe T 60 1`) is
+an **unvalidated arm**: the third argument's meaning is undocumented here, so
+that binary's pipeline mode and pinning for this invocation are unverified and
+its numbers sit ~23% below the figures the ledger records for the Zig
+comparator; no cross-miner claim is made from this run. And the frequency log
+(12,792 samples, 24 instances) is recorded but **not interpreted**: the
+instances labelled E-core read *higher* than the P-core ones, which is
+impossible on Raptor Lake, so the instance->core-type mapping is wrong. Only the
+trend is safe: average clock falls ~8% from 1T to 20T and is within ~3% across
+arms at equal thread count, so no arm was clock-starved. Mid-count legs are
+noisy (4T x1 read 8.06 and 6.99 in the two mirror positions); the 20T points are
+tight in both positions (x1 25.29/25.42, x2 26.34/26.36), which is the part the
+next experiment rests on.
+
+**The arXiv/go.dev lever hunt -- 20 candidates, 20 refutations.** A
+source-restricted research pass (5 arXiv readers via the export API, 4 readers
+over go.dev and the Go 1.27.0 source tree, no WebSearch) produced 139 findings
+and 20 candidates; every adversarial verification that ran refuted its
+candidate. Four refutations are worth keeping as closures rather than opinions:
+
+- *All-uniform-column* and *period-256* closed forms: the trigger population is
+  **exactly zero**. The wolf loop rescrambles whenever
+  `step_3[pos1]-step_3[pos2] <= 0x40` (`pow.go:2444-2459`), so a k>=3 template
+  run with every column uniform cannot occur; the proposed fast path could never
+  fire.
+- *k-way vvv closed form* (extending the retained `constantRunOrder` rule to the
+  large-fallback merge, from arXiv 1710.01896's repetition detection): refuted on
+  mechanism. Arena runs are not position-monotone at a uniform column -- their
+  order is induced from later non-uniform columns -- so per-chunk chains would
+  compare same-column positions across chunks, i.e. long LCPs (53.4% of
+  equal-key adjacent pairs share 64-255 bytes) in place of today's short
+  cross-column compares. Net <= 0; three votes reached this independently.
+- *Call-free comparator tail*: the tail is long, not short, so the runtime's
+  AVX2 memcmp is the right tool -- the same conclusion the 2026-08-19 archsimd
+  probe reached from the other side.
+- *SMT anti-phase turnstile*: with SA at 77.6% of hash, perfect anti-phasing
+  moves at most ~5 pp of wall time and only four of eight P-cores carry a
+  sibling at 20T; the handshake's idle cost is the same order as the gain.
+
+The rest fell to ceiling arithmetic below the gate (split radix histograms, LSD
+pass elision, branchless merge select, `-funcalign`, `PCALIGN`, `licm-off`,
+hot-big audit, per-core-type lane counts, CPU-Sets pinning) or were duplicates
+of E0. Seven candidates are **unverified rather than cleared** because a usage
+limit killed 34 of the 54 planned votes; they are listed with the readers' own
+priors in the vault note so they are not lost -- the largest are a
+`materializeOrigins` inline SWAR for count<=8 (drop the ABI0 round trip on the
+dominant path) and moving the fourteen port-5-only `PALIGNR` per block off p5 in
+the 2-way SHA-NI kernel.
+
+**E9 -- the x2 default.** The sweep's incidental finding is the one that pays:
+`-pair` leads at every thread count and is off by default on amd64. The comment
+justifying that default (`main.go:71-73`, "costs ~1% at high thread counts from
+the doubled working set") is stale twice: the -1.1%@20T measurement behind it
+predates the shared-scratch change, and `Hasher.HashPair` runs its two lanes
+**sequentially through one `v114Scratch`** (`hasher.go:54-62`), so x2 never
+doubled the hot set -- only the final SHA-256 is batched 2-way. Arms differ only
+in `defaultPairMode`, carry distinct sha256s, and each self-reports its pipeline
+in the bench header (`pipeline=x1` vs `pipeline=x2`).
+
+Measured, 20T Thue-Morse, 8 legs x 240 s + discarded warm-up, drift-adjusted
+(df=4): **+3.771%, 95% CI [+3.302%, +4.241%], one-sided 95% lower bound
++3.411%**, SE 0.169 pp, fitted drift +0.736%/leg. Every candidate leg
+(25.5275, 25.5575, 25.740, 25.7525 KH/s) sits above every base leg (24.3925,
+24.725, 24.860, 24.875) -- the arms do not overlap, which no other block this
+campaign managed. With the sweep's +1.4% at 1T the relaxed gate is met at both
+targets, so the default flipped (`defaultPairMode` now returns
+`PairHashSupported()`, commit `cb97c44`): x2 wherever the interleaved kernel
+exists, `-pair=false` still overrides. This is the largest retained effect in
+the ledger and it is a one-line default change; the code and README comments
+that justified the old default have been corrected rather than deleted, since
+the -1% figure was true before the shared-scratch commit.
+
+Run dirs: `bench-results/thread-sweep/20260821-020339-e0-go-vs-zig`,
+`bench-results/thue-morse/<stamp>-e9-x1-vs-x2default`. Vault:
+`research/2026-08-21-arxiv-godev-levers.md`,
+`benchmarks/2026-08-21-e0-thread-sweep.md`, pre-registration entries of
+2026-08-20 22:05 (E0) and 2026-08-21 02:35 (E9). Research journal with every
+finding and vote: `subagents/workflows/wf_9018347f-334/journal.jsonl`.
+
+## 2026-08-21 The 2-way SHA-NI kernel, priced
+
+With x2 the default pipeline, `sha256Blocks2NI` runs on every hash, so its
+inherited "~1.3x" claim was worth measuring rather than quoting. The instrument
+is a test-only probe (`internal/astrobwt/sha256mb_probe_amd64.s` and its
+`_test.go` twin, build tag `shaprobe`, absent from every shipped build):
+RDTSCP around 512-block calls, the two arms interleaved in Thue-Morse leg
+order so a frequency ramp is common-mode, median of 201 paired reps, go1.27.0,
+GOAMD64=v3.
+
+**Read the unit before the numbers.** RDTSCP counts invariant-TSC ticks, which
+advance at a fixed base rate while the core turbos well above it; ticks are not
+core cycles. The absolutes therefore move with the clock between runs -- the
+same code read 75.7 / 58.7 ticks per block in a later block of the session --
+while the paired ratios reproduce exactly. Every conclusion below rests on a
+ratio.
+
+| kernel | TSC ticks/block | derived core cyc/block | vs 1-way |
+|---|---:|---:|---:|
+| 1-way `sha256BlocksNI` | 67.4 | 139.1 | 1.00x |
+| 2-way `sha256Blocks2NI` | 52.3 | 107.9 | **1.29x** |
+| 2-way, per block-pair | 104.5 | 215.7 | - |
+
+The speedup is 1.29x at the median of 201 paired reps, IQR 1.25x-1.29x, and
+1.29x at the median of every run of the block. The inherited claim survives
+contact with an instrument. The derived column scales by a core:TSC ratio
+measured at 2.0637 on this host (2.0164-2.0637 across the session; TSC 2.3008
+GHz, implied core 4.75 GHz). That 2.35% spread is about +/-3 cycles at this
+magnitude, so the derived figures are good to roughly +/-3 and their decimal
+place is spurious; they are corroboration, and nothing here depends on them.
+The probe also does not lock its goroutine to a thread or read TSC_AUX, so a
+migration mid-sample would go undetected -- another reason only the paired
+ratio is load-bearing.
+
+The gap has a shape that needs no ratio at all. A lane on its own costs 67.4
+ticks/block; adding the second lane costs 37.1 ticks more. **The second lane
+costs 55% of a whole lane, where two independent 32-deep dependency chains
+sharing one execution unit's latency shadow should have cost close to nothing** --
+the block-pair sits at 1.55x the perfect-overlap ideal of 67.4 ticks.
+
+One wrong-by-design probe then tested the leading explanation for that.
+`probeBlocks2NoSched` is `sha256Blocks2NI` with the whole message schedule
+deleted -- 24 each of `SHA256MSG1`, `SHA256MSG2`, `PALIGNR`, and the
+`MOVO`/`PADDD` pair that stages the schedule temp -- leaving the same round
+chain, the same `X0` staging, the same loop structure, stale message words and
+so a deliberately wrong digest, which the test asserts lane by lane, so a copy
+that failed to remove the thing it was pricing fails loudly instead of
+reporting a quiet null. Every other mnemonic count matches the production
+kernel, and both carry 64 `SHA256RNDS2`.
+**The entire message schedule is 5.0% of 2-way kernel time** (IQR 4.9%-5.2%,
+and the median came back at 5.0-5.1% in every run of the block, against a
+threshold ten points away). That
+5.0% is an upper bound on what reordering the schedule could recover, because
+deleting it removes its dependency edges along with its uops while a reordering
+would keep them.
+
+The decision rule was fixed before the number was known (vault
+`go127-prereg-2026-08-20`, entry of 2026-08-21): schedule >= 15% -> price the
+`X0` funnel next and a schedule-side kernel change may be written; < 15% -> the
+kernel is round-chain bound and the surface closes on the numbers. 5.0% < 15%,
+so **the `X0`-funnel probe was never built and no kernel change was written**.
+There is no candidate arm in this campaign and no end-to-end leg; this section
+is the closure, not a preamble to one.
+
+**Verdict: the message schedule is not where the missing 0.7x went.** At 5.0%
+of kernel time it is far too small to be the gap, so schedule reordering and
+`PALIGNR` placement are both aiming at the wrong 5%. The derived cycles point
+the same way: 1-way runs at ~139 core cyc/block (+/-3, see the ratio caveat)
+against a dependency-chain floor of 32 serial `SHA256RNDS2`, which puts it
+close to that floor if the per-instruction latency really is ~4 cycles on
+Raptor Cove.
+
+Two limits on how far that verdict reaches, stated because this campaign
+stopped by rule rather than by exhaustion. The 4-cycle figure is an
+assumption, not something measured here: LLVM's Alder Lake P-core model uses 6
+for `SHA256RNDS2` while a published Raptor Cove microbenchmark reports ~4. At
+6 the floor would be 192 and the 1-way measurement would sit *below* it, which
+would mean the chain is not the binding constraint at all and this framing
+needs redoing. Separately, the pre-registered rule stopped the campaign before
+the `X0` staging was ever priced, so instruction staging, port contention and
+lane organisation remain unmeasured. What is closed is the schedule-side
+surface; calling the whole kernel architecturally maxed out would claim more
+than two probes can support.
+
+Scope of the closure: it retires schedule-side and `X0`-side rewrites of this
+kernel on Raptor Cove. It says nothing about hashing fewer SHA-256 blocks, and
+nothing about AMD, where the "2-way SHA-NI is ~2x" figure originated and where
+the SHA unit's throughput is a different number.
+
+Refuted at source level before any measurement, and not to be re-proposed:
+moving the 14 per-block `PALIGNR` off port 5 has no implementation -- `PALIGNR`
+is the only single-uop concat-shift, and `PSRLDQ`+`PSLLDQ`+`POR` costs 3-5 uops
+on the same shuffle ports. The measurement adds a second, independent reason:
+those `PALIGNR` sit inside the 5.0% the probe priced, so even a free relocation
+could not reach the retention gate. 3-way and 4-way interleave remain closed on
+register pressure (two lanes already hold 14 of 16 XMM registers plus `X0` and
+the shuffle mask).
+
 ## Closed Questions
 
+- *Does the Go miner have a thread-scaling problem?* No. Measured 2026-08-21 on
+  an idle box: per-thread efficiency 1T->20T is 59.9% (x1) / 61.4% (x2), the
+  same shape the siblings show, with **no E-cluster cliff at 12->16T** (x1
+  efficiency rises 69.8% -> 70.9%). The largest step is 4->8T, when the P-cores
+  fill. The four P-core SMT siblings at 16->20T are worth ~23% of a primary
+  thread each, but still worth taking: 20T beats 16T by +5.6% (x1) / +6.2% (x2),
+  so a "quiet" 16-thread operating point costs ~6%.
+- *Should x2 (`-pair`) be the amd64 default?* Yes, since 2026-08-21: +3.771%
+  [+3.302%, +4.241%] at 20T and +1.4% at 1T. The old opt-in rationale (a
+  doubled working set) stopped being true when the two lanes started sharing one
+  v114 scratch.
+- *Is the 2-way SHA-NI kernel's message schedule worth optimising?* No, and the
+  schedule-side surface is closed. Measured 2026-08-21 with a test-only RDTSCP
+  probe: 1-way 67.4 TSC ticks/block, 2-way 52.3 (104.5 per block-pair) = 1.29x,
+  IQR 1.25-1.29 and 1.29x at the median of every run. The whole message
+  schedule is 5.0% of kernel time (wrong-by-design probe with every
+  SHA256MSG1/MSG2 and schedule PALIGNR deleted), against a pre-registered
+  15% threshold for continuing, so the X0-funnel probe and the kernel change
+  were never built. 1-way already runs within ~8% of the pure dependency-chain
+  floor (32 serial SHA256RNDS2 x ~4 cyc -- an assumed latency this campaign did
+  not measure; LLVM's Alder Lake model says 6). What was NOT shown is that the
+  kernel as a whole is maxed out: the X0-staging probe was never built, because
+  the same pre-registered rule that closed the schedule stopped the campaign.
+  Reopen for the X0 funnel with a measured RNDS2 latency, or on AMD, where the
+  "~2x" figure originated and the SHA unit's throughput differs.
+- *Is there anything left in the suffix-array / radix / SMT literature?* Not for
+  this workload at this size. A source-restricted arXiv + go.dev pass produced
+  20 candidates and every adversarial verification that ran refuted its
+  candidate. Two are structural and permanent: the "all-uniform column" and
+  "period-256" closed forms have a trigger population of **exactly zero**
+  because the wolf loop rescrambles at `step_3[pos1]-step_3[pos2] <= 0x40`
+  (`pow.go:2444-2459`), and extending the DivSufSort repetition rule (arXiv
+  1710.01896) to the k-way merge is mechanism-inverted -- arena runs are not
+  position-monotone at a uniform column, so it would trade short cross-column
+  compares for long same-column ones. Unverified rather than cleared (their
+  votes died on a usage limit): a `materializeOrigins` inline SWAR for
+  count<=8 and `writeUniqueRunBatch` consuming count>8 in-kernel. The third,
+  moving the fourteen port-5-only `PALIGNR` per block off p5 in the 2-way
+  SHA-NI kernel, is **no longer unverified** -- it was measured and closed on
+  2026-08-21; see the next bullet.
+- *Where does the 2-way SHA-NI kernel's missing 0.7x go?* Into the SHA unit's
+  issue throughput, not into anything the code arranges around it. Measured
+  2026-08-21 with a test-only RDTSCP probe (`shaprobe` tag, Thue-Morse paired
+  legs, median of 201 reps): 1-way 67.4 TSC ticks/block, 2-way 52.3 (104.5 per
+  block-pair) -> interleave **1.29x**, so the second lane costs 55% of a whole
+  lane where overlapping two independent 32-deep chains should have cost close
+  to nothing. A wrong-by-design kernel with the entire message schedule deleted
+  prices that schedule at **5.0%** of 2-way kernel time against a
+  pre-registered 15% threshold, and 5.0% is an upper bound on what reordering
+  it could recover. The `X0`-funnel probe was therefore never built and no
+  kernel change was written: schedule-side and `X0`-side rewrites of this
+  kernel are closed on Raptor Cove. Untouched by this closure: hashing fewer
+  SHA-256 blocks, and the AMD case where the "~2x" figure originated.
+
+- *Does a refreshed PGO profile help?* Yes at 1T, neutral at 20T, and it now
+  ships: 2026-08-20 fresh go1.27.0 profile +1.42% [+0.67, +2.18] on a P-core,
+  +0.49% [+0.10, +0.88] on an E-core, pooled 20T -0.26% [-0.82, +0.31] over two
+  blocks; retained under the relaxed gate (commit `ed9d2c7`). The earlier
+  refreshes (08-03 +0.73%/1T +0.17%/20T, 08-09 +1.22% [-1.78, +4.32], 08-09
+  x2 +0.77% LB +0.19%) were the same effect measured too loosely. The
+  mechanism is inlining structure (the comparator call sites), so the next
+  refresh is due when the hot call graph changes again, not on a calendar.
+- *Does Go 1.27's compiler change hashrate?* No: go1.26.5 -> go1.27.0 on
+  identical source is +0.16% [-0.29%, +0.61%] at 20T and +0.2% at 1T; the
+  backend diff trims ~1% of hot-path instructions with no BCE change and
+  leaves the PGO hot set identical. Adopted as maintenance.
+- *asyncpreemptoff, alignhot=0, pgoinline knobs, newinliner?* All null or
+  negative at 20T/1T (2026-08-20); `//go:debug` cannot even express
+  asyncpreemptoff. Closed.
 - *Is there a faster SACA the other miners know about?* No. tnn-miner — the fastest
   open AstroBWTv3 miner — vendors canonical libdivsufsort (`divsufsort.c`, `sssort.c`,
   `trsort.c`); it has no libsais. Same family as v114. SA gains must come from
   engineering, not algorithm swaps.
 - *Would a lookup-table op kernel help?* No on Raptor Lake; see above.
+- *Does Go 1.27's `simd`/`archsimd` package help on amd64?* No. Every vector-shaped
+  kernel is already hand-written AVX2, `archsimd` measured 1.59x slower on the
+  comparator, and the remaining hot loops are memory-latency-bound or already asm.
+  The portable `simd` package also cannot express a movemask, so it could not
+  replace `buildEqualColumns` even at parity. **Re-confirmed by direct measurement
+  under the 1.27 API, 2026-08-19:** portable `simd` is 1.8x slower than the asm on
+  `materializeOrigins` (it compiles a per-call dispatch trampoline to four clones),
+  `archsimd` is 1-14% slower on `buildEqualColumns`, and on the comparator the
+  shipping kernel wins by 13-24% across the measured prefix distribution because
+  its `bytes.Compare` tail is already the runtime's AVX2 memcmp. Closed.
 - *AVX-512 multi-buffer SHA-256 (16-lane, minio/sha256-simd)?* Not on this host:
   Raptor Lake has no AVX-512. The "2x-interleaved SHA-NI is ~2x" figure is AMD-specific
   (Intel shows ~no gain); we already ship 2-way SHA-NI at ~1.3x, capped by Raptor Cove's
@@ -779,9 +1550,18 @@ decomposition than the whole miner family uses.
 - `go test -tags v114stats ./internal/astrobwt`
 - `go test -run=^$ -bench='BenchmarkHash(V114|PairV114|SAIS)$' -benchmem -count=5 ./internal/astrobwt`
 - `scripts\bench-matrix.ps1 -Candidate <name>` for sustained results.
+- Toolchain: go1.27.0 (CI `1.27.x`, release `1.27.0`) since 2026-08-20;
+  numbers measured under 1.26.5 are a different epoch (measured parity
+  +0.16% [-0.29%, +0.61%] at 20T, but do not bridge across it for anything
+  finer than that).
 - Retention (relaxed by the user, 2026-08-06; previously "at least 2% at
   either target"): keep a candidate that is provably positive at either
   target — one-sided 95% lower bound above the ~0.6% attribution floor on
   the paired instruments — provided the other target shows no demonstrated
   regression beyond 0.5% (point >= -0.5% and CI upper bound not below
   -0.5%). Correctness gates are unchanged and non-negotiable.
+- Micro screens get the same idle cooldown as sustained legs (>= 3 min after
+  any build, test burn or 20T block): on 2026-08-20 an identical-arms control
+  read -0.49% and a P-core-1 A/A read -0.62% when run minutes after a 20T
+  block. A marginal verdict is settled by ONE pre-registered replication
+  block pooled by inverse variance, never by re-running until it passes.

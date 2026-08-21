@@ -55,6 +55,21 @@ func runSelftest() int {
 			fmt.Printf("FAIL %s 48-byte vector = %s\n", b.name, got)
 			return 1
 		}
+		// The same vector through the paired path, which is what the miner runs
+		// by default wherever the 2-way kernel exists. Pairing it against a
+		// second, differing blob also proves the lanes do not contaminate each
+		// other: lane A must still reproduce the vector.
+		other := append([]byte(nil), data...)
+		other[43] ^= 0xff
+		pa, pb := h.HashPair(data, other)
+		if fmt.Sprintf("%x", pa) != "c392762a462fd991ace791bfe858c338c10c23c555796b50f665b636cb8c8440" {
+			fmt.Printf("FAIL %s paired 48-byte vector lane A = %x\n", b.name, pa)
+			return 1
+		}
+		if wb := h.Hash(other); pb != wb {
+			fmt.Printf("FAIL %s paired lane B = %x, single = %x\n", b.name, pb, wb)
+			return 1
+		}
 	}
 	fmt.Printf("selftest pow(a): %s PASS (%d vectors x %d backends)\n", katHash, len(selftestVectors)+1, len(backends))
 	return 0

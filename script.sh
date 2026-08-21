@@ -13,7 +13,7 @@ if   [ -f "./go-miner.exe" ]; then BIN="./go-miner.exe"
 elif [ -f "./go-miner" ];     then BIN="./go-miner"
 else
     echo "go-miner not found; building (best-performance defaults)..."
-    command -v go >/dev/null 2>&1 || { echo "error: install Go 1.25+ and retry." >&2; exit 1; }
+    command -v go >/dev/null 2>&1 || { echo "error: install Go 1.27+ and retry." >&2; exit 1; }
     GOAMD64=v3 go build -pgo=default.pgo -trimpath -ldflags "-s -w" -o go-miner .
     BIN="./go-miner"
 fi

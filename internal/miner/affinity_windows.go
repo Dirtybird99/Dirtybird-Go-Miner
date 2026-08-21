@@ -11,24 +11,28 @@ import (
 )
 
 var (
-	kernel32                              = windows.NewLazySystemDLL("kernel32.dll")
-	procSetThreadAffinityMask             = kernel32.NewProc("SetThreadAffinityMask")
-	procGetLogicalProcessorInformationEx  = kernel32.NewProc("GetLogicalProcessorInformationEx")
+	kernel32                             = windows.NewLazySystemDLL("kernel32.dll")
+	procSetThreadAffinityMask            = kernel32.NewProc("SetThreadAffinityMask")
+	procGetLogicalProcessorInformationEx = kernel32.NewProc("GetLogicalProcessorInformationEx")
 )
 
 // PinOrder returns the CPU order workers pin to: primary thread of each core,
 // most-performant efficiency class first (P-cores before E-cores on hybrid
 // parts), then the remaining SMT siblings. Falls back to the official miner's
-// avoidHT interleave if topology can't be read.
-func PinOrder() []int {
+// avoidHT interleave if topology can't be read. Returns nil rather than
+// partially pinning when there are too few group-0 CPUs for threads.
+func PinOrder(threads int) []int {
 	if order := pCoreFirstOrder(); order != nil {
-		return order
+		return pinOrderForThreads(order, threads)
 	}
-	return interleaveOrder()
+	return pinOrderForThreads(interleaveOrder(), threads)
 }
 
 func interleaveOrder() []int {
 	n := runtime.NumCPU()
+	if n > 64 { // SetThreadAffinityMask only addresses processor group 0
+		n = 64
+	}
 	order := make([]int, 0, n)
 	for i := 0; i < n; i += 2 {
 		order = append(order, i)

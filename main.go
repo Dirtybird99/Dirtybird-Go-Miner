@@ -66,19 +66,21 @@ func (o *options) backend() astrobwt.Backend {
 
 func validSAName(name string) bool { return name == "v114" || name == "sais" }
 
-// defaultPairMode: the 2-way batched final hash defaults on for arm64 with
-// the SHA2 extensions (family parity with the Rust miner — the interleaved
-// kernel wins on every ARM core measured) and stays opt-in on amd64, where
-// it costs ~1% at high thread counts from the doubled working set. An
-// explicit -pair=false always wins over the default.
+// defaultPairMode: the 2-way batched final hash defaults on wherever the
+// interleaved kernel exists — arm64 with the SHA2 extensions and amd64 with
+// SHA-NI. It was opt-in on amd64 while the two lanes each carried their own
+// v114 scratch; they now run sequentially through one (see Hasher.HashPair),
+// so the dominant ~2.8 MB workspace is no longer doubled — a second
+// ScratchData is still allocated — and both lanes' final SHA-256 goes through
+// the 2-way block. Measured on an i7-13700HX, 8-leg drift-adjusted:
+// +3.771% [+3.302%, +4.241%] at 20 threads, +1.4% at one. An explicit
+// -pair=false always wins over the default.
 func defaultPairMode() bool {
-	return runtime.GOARCH == "arm64" && astrobwt.PairHashSupported()
+	return astrobwt.PairHashSupported()
 }
 
-// defaultPinModeFor: pinning defaults on only where the affinity code can
-// pin every thread. Above 64 logical CPUs Windows splits processor groups
-// and pinCurrentThread bails per-thread, which would leave a PARTIAL pin —
-// worse than none.
+// defaultPinModeFor: pinning defaults on only where one Windows processor
+// group can represent every worker. Larger systems stay opt-in.
 func defaultPinModeFor(goos, goarch string, ncpu int) bool {
 	return goos == "windows" && goarch == "amd64" && ncpu <= 64
 }
@@ -193,7 +195,8 @@ advanced (benchmarking/tuning):
                          (pin defaults on for Windows amd64 up to 64 logical CPUs;
                           --pin=false disables)
   --pair                 2 nonces/thread with a 2-way batched final hash
-                         (default on arm64 with SHA2; --pair=false disables)
+                         (default wherever the kernel exists: amd64 with
+                          SHA-NI, arm64 with SHA2; --pair=false disables)
   --sa v114|sais         suffix-array backend (default v114)
   --dry-run / --debug / --cpuprofile <file>
 `, defaultDaemon)
@@ -303,8 +306,8 @@ func run() int {
 	} else {
 		cons.Logf("INFO", "Features: avx2 %s | avx512 %s | sha %s",
 			yesNo(cpuid.CPU.Supports(cpuid.AVX2)), yesNo(cpuid.CPU.Supports(cpuid.AVX512F)), yesNo(cpuid.CPU.Supports(cpuid.SHA)))
-		cons.Logf("INFO", "Fast path: SHA-NI build %s; AVX512 mining path No",
-			yesNo(cpuid.CPU.Supports(cpuid.SHA, cpuid.SSSE3, cpuid.SSE4)))
+		cons.Logf("INFO", "Fast path: SHA-NI build %s; AVX512 mining path %s",
+			yesNo(cpuid.CPU.Supports(cpuid.SHA, cpuid.SSSE3, cpuid.SSE4)), yesNo(astrobwt.AVX512MiningPath))
 	}
 	fmt.Fprintln(os.Stderr)
 
@@ -381,7 +384,7 @@ func run() int {
 	if !o.dryRun {
 		var pinOrder []int
 		if o.pin {
-			pinOrder = miner.PinOrder()
+			pinOrder = miner.PinOrder(o.threads)
 			if o.debugFlag {
 				cons.Logf("DEBUG", "pin order: %v", pinOrder)
 			}

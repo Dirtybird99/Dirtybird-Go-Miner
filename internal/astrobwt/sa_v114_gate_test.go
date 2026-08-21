@@ -38,9 +38,28 @@ func TestV114MillionHashGate(t *testing.T) {
 			rnd := rand.New(rand.NewSource(seed))
 			hv := NewWithBackend(BackendV114)
 			hs := NewWithBackend(BackendSAIS)
-			var work [48]byte
+			var work, work2 [48]byte
 			for i := 0; i < per && !failed.Load(); i++ {
 				rnd.Read(work[:])
+				// Alternate the single and paired paths. Pairing is the
+				// default wherever the 2-way kernel exists, so a gate that
+				// only ever called Hash would leave the path those users
+				// actually run unverified at scale.
+				if i%2 == 1 {
+					rnd.Read(work2[:])
+					gotA, gotB := hv.HashPair(work[:], work2[:])
+					wantA, wantB := hs.Hash(work[:]), hs.Hash(work2[:])
+					if gotA != wantA || gotB != wantB {
+						failed.Store(true)
+						once.Do(func() {
+							t.Errorf("PAIR MISMATCH inputs %x / %x: v114 %x / %x, sais %x / %x",
+								work, work2, gotA, gotB, wantA, wantB)
+						})
+						return
+					}
+					done.Add(2)
+					continue
+				}
 				got := hv.Hash(work[:])
 				want := hs.Hash(work[:])
 				if got != want {

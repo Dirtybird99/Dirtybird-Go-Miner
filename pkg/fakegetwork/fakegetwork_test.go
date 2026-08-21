@@ -5,6 +5,7 @@ package fakegetwork
 
 import (
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -277,5 +278,67 @@ func TestCloseHangsUpLiveConnections(t *testing.T) {
 			}
 			return // hung up, as it should be
 		}
+	}
+}
+
+// TestOnSubmitIsSerialized pins the callback contract. Every connection has its
+// own reader goroutine, so two clients -- or one that reconnects while the old
+// handler is still draining -- reach OnSubmit at the same time. This package
+// exists to be imported by other modules' tests, and the obvious callback there
+// is an unsynchronized counter, so the counter below is deliberately lock-free:
+// without the serialization in addSubmission this test fails under -race.
+func TestOnSubmitIsSerialized(t *testing.T) {
+	const clients, perClient = 2, 100
+
+	unguarded := 0 // deliberately not atomic; see the comment above
+	srv := Start(Config{OnSubmit: func(Submission) { unguarded++ }})
+	defer srv.Close() // idempotent; the real Close is below
+
+	start := make(chan struct{})
+	var writers sync.WaitGroup
+	for c := 0; c < clients; c++ {
+		conn, _, err := websocket.DefaultDialer.Dial(srv.URL(), nil)
+		if err != nil {
+			t.Fatalf("dial %d: %v", c, err)
+		}
+		defer conn.Close()
+
+		var frame getwork.Job
+		if err := conn.ReadJSON(&frame); err != nil {
+			t.Fatalf("client %d read: %v", c, err)
+		}
+
+		writers.Add(1)
+		go func(c int, conn *websocket.Conn) {
+			defer writers.Done()
+			<-start // both clients submit into the same window
+			for i := 0; i < perClient; i++ {
+				if err := conn.WriteJSON(getwork.Submit{
+					JobID: "job-0",
+					Blob:  fmt.Sprintf("%d-%d", c, i),
+				}); err != nil {
+					return
+				}
+			}
+		}(c, conn)
+	}
+	close(start)
+	writers.Wait()
+
+	const want = clients * perClient
+	deadline := time.Now().Add(10 * time.Second)
+	for len(srv.Submissions()) < want && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Close joins every handler and its reader, so the callback is quiescent --
+	// and the counter safe to read -- by the time it returns.
+	srv.Close()
+
+	if got := len(srv.Submissions()); got != want {
+		t.Fatalf("Submissions = %d, want %d", got, want)
+	}
+	if unguarded != want {
+		t.Fatalf("OnSubmit counter = %d, want %d; concurrent calls lost updates", unguarded, want)
 	}
 }
