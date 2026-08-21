@@ -1353,6 +1353,88 @@ Run dirs: `bench-results/thread-sweep/20260821-020339-e0-go-vs-zig`,
 2026-08-20 22:05 (E0) and 2026-08-21 02:35 (E9). Research journal with every
 finding and vote: `subagents/workflows/wf_9018347f-334/journal.jsonl`.
 
+## 2026-08-21 The 2-way SHA-NI kernel, priced
+
+With x2 the default pipeline, `sha256Blocks2NI` runs on every hash, so its
+inherited "~1.3x" claim was worth measuring rather than quoting. The instrument
+is a test-only probe (`internal/astrobwt/sha256mb_probe_amd64.s` and its
+`_test.go` twin, build tag `shaprobe`, absent from every shipped build):
+RDTSCP around 512-block calls, the two arms interleaved in Thue-Morse leg
+order so a frequency ramp is common-mode, median of 201 paired reps, go1.27.0,
+GOAMD64=v3.
+
+**Read the unit before the numbers.** RDTSCP counts invariant-TSC ticks, which
+advance at a fixed base rate while the core turbos well above it; ticks are not
+core cycles. The absolutes therefore move with the clock between runs -- the
+same code read 75.7 / 58.7 ticks per block in a later block of the session --
+while the paired ratios reproduce exactly. Every conclusion below rests on a
+ratio.
+
+| kernel | TSC ticks/block | derived core cyc/block | vs 1-way |
+|---|---:|---:|---:|
+| 1-way `sha256BlocksNI` | 67.4 | 139.1 | 1.00x |
+| 2-way `sha256Blocks2NI` | 52.3 | 107.9 | **1.29x** |
+| 2-way, per block-pair | 104.5 | 215.7 | - |
+
+The speedup is 1.29x at the median of 201 paired reps, IQR 1.29x-1.29x, and
+1.29x in each of the block's three runs. The inherited claim survives contact
+with an instrument. The derived column scales by a core:TSC ratio measured at
+2.0637 on this host (2.0164-2.0637 across the session; TSC 2.3008 GHz, implied
+core 4.75 GHz) and carries that ratio's uncertainty; it is corroboration, and
+nothing here depends on it.
+
+The gap has a shape that needs no ratio at all. A lane on its own costs 67.4
+ticks/block; adding the second lane costs 37.1 ticks more. **The second lane
+costs 55% of a whole lane, where two independent 32-deep dependency chains
+sharing one execution unit's latency shadow should have cost close to nothing** --
+the block-pair sits at 1.55x the perfect-overlap ideal of 67.4 ticks.
+
+One wrong-by-design probe then tested the leading explanation for that.
+`probeBlocks2NoSched` is `sha256Blocks2NI` with every `SHA256MSG1`,
+`SHA256MSG2` and schedule `PALIGNR` deleted: same round chain, same `X0`
+staging, same loop structure, stale message words and so a deliberately wrong
+digest, which the test asserts lane by lane, so a copy that failed to remove
+the thing it was pricing fails loudly instead of reporting a quiet null.
+**The entire message schedule is 5.0% of 2-way kernel time** (IQR 4.9%-5.2%;
+5.0 / 5.1 / 5.0 across three runs, against a threshold ten points away). That
+5.0% is an upper bound on what reordering the schedule could recover, because
+deleting it removes its dependency edges along with its uops while a reordering
+would keep them.
+
+The decision rule was fixed before the number was known (vault
+`go127-prereg-2026-08-20`, entry of 2026-08-21): schedule >= 15% -> price the
+`X0` funnel next and a schedule-side kernel change may be written; < 15% -> the
+kernel is round-chain bound and the surface closes on the numbers. 5.0% < 15%,
+so **the `X0`-funnel probe was never built and no kernel change was written**.
+There is no candidate arm in this campaign and no end-to-end leg; this section
+is the closure, not a preamble to one.
+
+**Verdict: the 2-way kernel is at its architectural ceiling on this host, and
+the missing 0.7x is not reachable from the code.** With the schedule at 5.0%,
+there is almost nothing left around the `SHA256RNDS2` chain to hide. The
+derived cycles say the same from the other side: 1-way runs at ~139 core
+cyc/block against a pure dependency-chain floor of 32 serial `SHA256RNDS2` x
+~4 cyc = 128, i.e. within roughly a tenth of the floor, so its non-round uops
+are already in the shadow. Interleaving a second lane cannot buy back latency
+that was never being lost; it can only buy issue slots on the one SHA unit, and
+1.29x is what that unit gives. Every lever this diagnosis set out to pull --
+schedule reordering, `X0` staging, `PALIGNR` placement -- aims at the 5% that
+is already hidden.
+
+Scope of the closure: it retires schedule-side and `X0`-side rewrites of this
+kernel on Raptor Cove. It says nothing about hashing fewer SHA-256 blocks, and
+nothing about AMD, where the "2-way SHA-NI is ~2x" figure originated and where
+the SHA unit's throughput is a different number.
+
+Refuted at source level before any measurement, and not to be re-proposed:
+moving the 14 per-block `PALIGNR` off port 5 has no implementation -- `PALIGNR`
+is the only single-uop concat-shift, and `PSRLDQ`+`PSLLDQ`+`POR` costs 3-5 uops
+on the same shuffle ports. The measurement adds a second, independent reason:
+those `PALIGNR` sit inside the 5.0% the probe priced, so even a free relocation
+could not reach the retention gate. 3-way and 4-way interleave remain closed on
+register pressure (two lanes already hold 14 of 16 XMM registers plus `X0` and
+the shuffle mask).
+
 ## Closed Questions
 
 - *Does the Go miner have a thread-scaling problem?* No. Measured 2026-08-21 on
@@ -1377,8 +1459,23 @@ finding and vote: `subagents/workflows/wf_9018347f-334/journal.jsonl`.
   position-monotone at a uniform column, so it would trade short cross-column
   compares for long same-column ones. Unverified rather than cleared (their
   votes died on a usage limit): a `materializeOrigins` inline SWAR for
-  count<=8, `writeUniqueRunBatch` consuming count>8 in-kernel, and moving the
-  fourteen port-5-only `PALIGNR` per block off p5 in the 2-way SHA-NI kernel.
+  count<=8 and `writeUniqueRunBatch` consuming count>8 in-kernel. The third,
+  moving the fourteen port-5-only `PALIGNR` per block off p5 in the 2-way
+  SHA-NI kernel, is **no longer unverified** -- it was measured and closed on
+  2026-08-21; see the next bullet.
+- *Where does the 2-way SHA-NI kernel's missing 0.7x go?* Into the SHA unit's
+  issue throughput, not into anything the code arranges around it. Measured
+  2026-08-21 with a test-only RDTSCP probe (`shaprobe` tag, Thue-Morse paired
+  legs, median of 201 reps): 1-way 67.4 TSC ticks/block, 2-way 52.3 (104.5 per
+  block-pair) -> interleave **1.29x**, so the second lane costs 55% of a whole
+  lane where overlapping two independent 32-deep chains should have cost close
+  to nothing. A wrong-by-design kernel with the entire message schedule deleted
+  prices that schedule at **5.0%** of 2-way kernel time against a
+  pre-registered 15% threshold, and 5.0% is an upper bound on what reordering
+  it could recover. The `X0`-funnel probe was therefore never built and no
+  kernel change was written: schedule-side and `X0`-side rewrites of this
+  kernel are closed on Raptor Cove. Untouched by this closure: hashing fewer
+  SHA-256 blocks, and the AMD case where the "~2x" figure originated.
 
 - *Does a refreshed PGO profile help?* Yes at 1T, neutral at 20T, and it now
   ships: 2026-08-20 fresh go1.27.0 profile +1.42% [+0.67, +2.18] on a P-core,
