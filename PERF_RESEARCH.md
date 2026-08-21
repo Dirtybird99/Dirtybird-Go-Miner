@@ -1449,6 +1449,17 @@ the shuffle mask).
   [+3.302%, +4.241%] at 20T and +1.4% at 1T. The old opt-in rationale (a
   doubled working set) stopped being true when the two lanes started sharing one
   v114 scratch.
+- *Can the 2-way SHA-NI kernel be made to interleave better than 1.29x?* No, not
+  from the code, on Raptor Cove. Measured 2026-08-21 with a test-only RDTSCP
+  probe: 1-way 67.4 TSC ticks/block, 2-way 52.3 (104.5 per block-pair) = 1.29x,
+  IQR 1.25-1.29 and 1.29x at the median of every run. The whole message
+  schedule is 5.0% of kernel time (wrong-by-design probe with every
+  SHA256MSG1/MSG2 and schedule PALIGNR deleted), against a pre-registered
+  15% threshold for continuing, so the X0-funnel probe and the kernel change
+  were never built. 1-way already runs within ~8% of the pure dependency-chain
+  floor (32 serial SHA256RNDS2 x ~4 cyc), so there is no latency left to hide
+  and the second lane buys issue slots only. Reopen only on AMD, where the
+  "~2x" figure originated and the SHA unit's throughput differs.
 - *Is there anything left in the suffix-array / radix / SMT literature?* Not for
   this workload at this size. A source-restricted arXiv + go.dev pass produced
   20 candidates and every adversarial verification that ran refuted its

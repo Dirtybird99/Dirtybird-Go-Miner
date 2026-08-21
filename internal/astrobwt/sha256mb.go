@@ -5,8 +5,11 @@ package astrobwt
 // 2-way multi-buffer SHA-256 over SHA-NI (sha256mb_amd64.s). Single-stream
 // SHA-NI is latency-bound (each sha256rnds2 depends on the previous), so
 // hashing two independent messages with interleaved instruction streams lets
-// the out-of-order engine overlap the chains — ~1.3x throughput on Raptor
-// Cove (capped by its single shared SHA port). Same design as the zig
+// the out-of-order engine overlap the chains — measured 1.29x on Raptor Cove
+// (67.4 vs 52.3 TSC ticks per block), which is what its one shared SHA unit
+// gives: single-stream already runs within ~8% of the dependency-chain floor,
+// and the whole message schedule is 5% of kernel time, so there is no latency
+// left for a third lane or a cheaper schedule to hide. Same design as the zig
 // miner's sha256_mb.zig; digests are byte-identical to crypto/sha256.
 
 import (
