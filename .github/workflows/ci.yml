@@ -37,6 +37,17 @@ jobs:
         env:
           GOAMD64: v3
         run: go test ./...
+      # Hosted runners need not expose x86-64-v4, but they can still compile
+      # and vet the AVX-512 files so a broken declaration or instruction never
+      # waits for an AMD feedback host to be discovered.
+      - name: Compile gate (GOAMD64=v4)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          GOAMD64: v4
+        run: |
+          go vet ./...
+          go build -pgo=default.pgo -trimpath -o "$RUNNER_TEMP/go-miner-v4" .
+          go test -c -o "$RUNNER_TEMP/astrobwt-v4.test" ./internal/astrobwt
       - name: Benchmark matrix smoke
         if: runner.os == 'Windows'
         shell: pwsh
