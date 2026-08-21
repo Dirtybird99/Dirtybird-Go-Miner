@@ -16,6 +16,7 @@ import (
 	"go-miner/internal/config"
 	"go-miner/internal/getwork"
 	"go-miner/internal/miner"
+	"go-miner/pkg/engine"
 )
 
 func TestValidSAName(t *testing.T) {
@@ -321,5 +322,16 @@ func TestStatusRowStaysSilentUntilThereIsSomethingToSay(t *testing.T) {
 	// keep the row alive.
 	if statusRowHasSomethingToSay(false, 5) {
 		t.Error("kept the row alive across a disconnect")
+	}
+}
+
+// TestPairDefaultMatchesEngine keeps the CLI's default pipeline and the
+// embeddable engine's exported default from drifting apart. pkg/engine
+// documents DefaultPair as mirroring the CLI, and an embedder that quietly
+// gets a different pipeline than the binary is a support question nobody can
+// answer from either side's source.
+func TestPairDefaultMatchesEngine(t *testing.T) {
+	if got, want := defaultPairMode(), engine.DefaultPair(); got != want {
+		t.Fatalf("defaultPairMode() = %v, engine.DefaultPair() = %v; the CLI and the engine must agree", got, want)
 	}
 }

@@ -53,10 +53,13 @@ var ErrBrokenHash = errors.New("AstroBWTv3 self-test failed; refusing to mine")
 // ErrInvalidConfig is returned by Start for an empty endpoint or wallet.
 var ErrInvalidConfig = errors.New("engine: endpoint and wallet are required")
 
-// DefaultPair mirrors the CLI default: 2-way batched final hashing on for
-// arm64 with SHA2 extensions, opt-in elsewhere.
+// DefaultPair mirrors the CLI default: 2-way batched final hashing on
+// wherever the interleaved kernel exists — arm64 with the SHA2 extensions and
+// amd64 with SHA-NI. The two lanes share one v114 scratch and run
+// sequentially, so pairing costs no extra working set; all it changes is that
+// both lanes' final SHA-256 goes through the interleaved block.
 func DefaultPair() bool {
-	return runtime.GOARCH == "arm64" && astrobwt.PairHashSupported()
+	return astrobwt.PairHashSupported()
 }
 
 // DefaultBackendName is the suffix-array implementation used unless Config
