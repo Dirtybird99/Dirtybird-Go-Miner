@@ -1238,7 +1238,147 @@ campaign section. Vault: pre-registration, one benchmark note per block
 (`02-projects/go-miner/benchmarks/2026-08-20-*.md`), campaign log
 `go127-toolchain-pgo-campaign-2026-08-20.md`.
 
+## 2026-08-21 Thread sweep (E0), arXiv/go.dev lever hunt, and the x2 default (E9)
+
+Two questions closed on one idle box: where the Go miner's scaling actually
+bends, and whether the literature has anything left for the hot loops. The
+sweep answered the first with numbers and turned up the session's only real
+win, which had nothing to do with the literature.
+
+**E0 -- the thread sweep the miner never had.** `scripts/bench-thread-sweep.ps1`
+(new) runs each arm as a cold 60 s `--sustained` leg at 1/2/4/8/12/16/20
+threads, mirror order per point (`go-x1 go-x2 zig-x2 zig-x2 go-x2 go-x1`), 30 s
+cooldowns, stray check before every leg, per-logical-processor Actual Frequency
+sampled throughout; median of the two legs per (arm, threads).
+
+| threads | go-x1 KH/s | eff vs 1T | go-x2 KH/s | eff vs 1T | x2 vs x1 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 2.115 | 100.0% | 2.145 | 100.0% | +1.4% |
+| 2 | 4.115 | 97.3% | 4.380 | 102.1% | +6.4% |
+| 4 | 7.525 | 88.9% | 7.955 | 92.7% | +5.7% |
+| 8 | 12.565 | 74.3% | 12.545 | 73.1% | -0.2% |
+| 12 | 17.715 | 69.8% | 19.560 | 76.0% | +10.4% |
+| 16 | 24.000 | 70.9% | 24.805 | 72.3% | +3.4% |
+| 20 | 25.355 | 59.9% | 26.350 | 61.4% | +3.9% |
+
+Three readings. (1) **There is no E-cluster cliff in this miner.** x1
+efficiency *rises* across 12->16T, the step where all eight E-cores engage and
+where the Zig sibling lost 11 pp in 2026-08 before its working set was halved.
+The pre-registered trigger for an SoA radix restructure (a Go-only drop >= 5 pp
+there) never fired, so that candidate is closed unbuilt -- consistent with the
+two nulls that bracket it (shared scratch +0.26%, large pages pooled -0.06%):
+the hot set already fits. (2) **The largest step is 4->8T** (-14.6 pp), when the
+P-cores fill, not when the E-cores do; the same step appears in the other arm.
+(3) **16->20T costs -11.0 pp**: the four SMT siblings add 1.355 KH/s, 339 H/s
+each against a 1,500 H/s average, i.e. a sibling is worth ~23% of a primary.
+They are still worth taking -- 20T beats 16T by +5.6% (x1) / +6.2% (x2) -- which
+answers the "quiet 16T operating point" question in the negative.
+
+Two cautions travel with the table. The Zig column (`bench2_pgo.exe T 60 1`) is
+an **unvalidated arm**: the third argument's meaning is undocumented here, so
+that binary's pipeline mode and pinning for this invocation are unverified and
+its numbers sit ~23% below the figures the ledger records for the Zig
+comparator; no cross-miner claim is made from this run. And the frequency log
+(12,792 samples, 24 instances) is recorded but **not interpreted**: the
+instances labelled E-core read *higher* than the P-core ones, which is
+impossible on Raptor Lake, so the instance->core-type mapping is wrong. Only the
+trend is safe: average clock falls ~8% from 1T to 20T and is within ~3% across
+arms at equal thread count, so no arm was clock-starved. Mid-count legs are
+noisy (4T x1 read 8.06 and 6.99 in the two mirror positions); the 20T points are
+tight in both positions (x1 25.29/25.42, x2 26.34/26.36), which is the part the
+next experiment rests on.
+
+**The arXiv/go.dev lever hunt -- 20 candidates, 20 refutations.** A
+source-restricted research pass (5 arXiv readers via the export API, 4 readers
+over go.dev and the Go 1.27.0 source tree, no WebSearch) produced 139 findings
+and 20 candidates; every adversarial verification that ran refuted its
+candidate. Four refutations are worth keeping as closures rather than opinions:
+
+- *All-uniform-column* and *period-256* closed forms: the trigger population is
+  **exactly zero**. The wolf loop rescrambles whenever
+  `step_3[pos1]-step_3[pos2] <= 0x40` (`pow.go:2444-2459`), so a k>=3 template
+  run with every column uniform cannot occur; the proposed fast path could never
+  fire.
+- *k-way vvv closed form* (extending the retained `constantRunOrder` rule to the
+  large-fallback merge, from arXiv 1710.01896's repetition detection): refuted on
+  mechanism. Arena runs are not position-monotone at a uniform column -- their
+  order is induced from later non-uniform columns -- so per-chunk chains would
+  compare same-column positions across chunks, i.e. long LCPs (53.4% of
+  equal-key adjacent pairs share 64-255 bytes) in place of today's short
+  cross-column compares. Net <= 0; three votes reached this independently.
+- *Call-free comparator tail*: the tail is long, not short, so the runtime's
+  AVX2 memcmp is the right tool -- the same conclusion the 2026-08-19 archsimd
+  probe reached from the other side.
+- *SMT anti-phase turnstile*: with SA at 77.6% of hash, perfect anti-phasing
+  moves at most ~5 pp of wall time and only four of eight P-cores carry a
+  sibling at 20T; the handshake's idle cost is the same order as the gain.
+
+The rest fell to ceiling arithmetic below the gate (split radix histograms, LSD
+pass elision, branchless merge select, `-funcalign`, `PCALIGN`, `licm-off`,
+hot-big audit, per-core-type lane counts, CPU-Sets pinning) or were duplicates
+of E0. Seven candidates are **unverified rather than cleared** because a usage
+limit killed 34 of the 54 planned votes; they are listed with the readers' own
+priors in the vault note so they are not lost -- the largest are a
+`materializeOrigins` inline SWAR for count<=8 (drop the ABI0 round trip on the
+dominant path) and moving the fourteen port-5-only `PALIGNR` per block off p5 in
+the 2-way SHA-NI kernel.
+
+**E9 -- the x2 default.** The sweep's incidental finding is the one that pays:
+`-pair` leads at every thread count and is off by default on amd64. The comment
+justifying that default (`main.go:71-73`, "costs ~1% at high thread counts from
+the doubled working set") is stale twice: the -1.1%@20T measurement behind it
+predates the shared-scratch change, and `Hasher.HashPair` runs its two lanes
+**sequentially through one `v114Scratch`** (`hasher.go:54-62`), so x2 never
+doubled the hot set -- only the final SHA-256 is batched 2-way. Arms differ only
+in `defaultPairMode`, carry distinct sha256s, and each self-reports its pipeline
+in the bench header (`pipeline=x1` vs `pipeline=x2`).
+
+Measured, 20T Thue-Morse, 8 legs x 240 s + discarded warm-up, drift-adjusted
+(df=4): **+3.771%, 95% CI [+3.302%, +4.241%], one-sided 95% lower bound
++3.411%**, SE 0.169 pp, fitted drift +0.736%/leg. Every candidate leg
+(25.5275, 25.5575, 25.740, 25.7525 KH/s) sits above every base leg (24.3925,
+24.725, 24.860, 24.875) -- the arms do not overlap, which no other block this
+campaign managed. With the sweep's +1.4% at 1T the relaxed gate is met at both
+targets, so the default flipped (`defaultPairMode` now returns
+`PairHashSupported()`, commit `cb97c44`): x2 wherever the interleaved kernel
+exists, `-pair=false` still overrides. This is the largest retained effect in
+the ledger and it is a one-line default change; the code and README comments
+that justified the old default have been corrected rather than deleted, since
+the -1% figure was true before the shared-scratch commit.
+
+Run dirs: `bench-results/thread-sweep/20260821-020339-e0-go-vs-zig`,
+`bench-results/thue-morse/<stamp>-e9-x1-vs-x2default`. Vault:
+`research/2026-08-21-arxiv-godev-levers.md`,
+`benchmarks/2026-08-21-e0-thread-sweep.md`, pre-registration entries of
+2026-08-20 22:05 (E0) and 2026-08-21 02:35 (E9). Research journal with every
+finding and vote: `subagents/workflows/wf_9018347f-334/journal.jsonl`.
+
 ## Closed Questions
+
+- *Does the Go miner have a thread-scaling problem?* No. Measured 2026-08-21 on
+  an idle box: per-thread efficiency 1T->20T is 59.9% (x1) / 61.4% (x2), the
+  same shape the siblings show, with **no E-cluster cliff at 12->16T** (x1
+  efficiency rises 69.8% -> 70.9%). The largest step is 4->8T, when the P-cores
+  fill. The four P-core SMT siblings at 16->20T are worth ~23% of a primary
+  thread each, but still worth taking: 20T beats 16T by +5.6% (x1) / +6.2% (x2),
+  so a "quiet" 16-thread operating point costs ~6%.
+- *Should x2 (`-pair`) be the amd64 default?* Yes, since 2026-08-21: +3.771%
+  [+3.302%, +4.241%] at 20T and +1.4% at 1T. The old opt-in rationale (a
+  doubled working set) stopped being true when the two lanes started sharing one
+  v114 scratch.
+- *Is there anything left in the suffix-array / radix / SMT literature?* Not for
+  this workload at this size. A source-restricted arXiv + go.dev pass produced
+  20 candidates and every adversarial verification that ran refuted its
+  candidate. Two are structural and permanent: the "all-uniform column" and
+  "period-256" closed forms have a trigger population of **exactly zero**
+  because the wolf loop rescrambles at `step_3[pos1]-step_3[pos2] <= 0x40`
+  (`pow.go:2444-2459`), and extending the DivSufSort repetition rule (arXiv
+  1710.01896) to the k-way merge is mechanism-inverted -- arena runs are not
+  position-monotone at a uniform column, so it would trade short cross-column
+  compares for long same-column ones. Unverified rather than cleared (their
+  votes died on a usage limit): a `materializeOrigins` inline SWAR for
+  count<=8, `writeUniqueRunBatch` consuming count>8 in-kernel, and moving the
+  fourteen port-5-only `PALIGNR` per block off p5 in the 2-way SHA-NI kernel.
 
 - *Does a refreshed PGO profile help?* Yes at 1T, neutral at 20T, and it now
   ships: 2026-08-20 fresh go1.27.0 profile +1.42% [+0.67, +2.18] on a P-core,
