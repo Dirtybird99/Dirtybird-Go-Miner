@@ -196,7 +196,8 @@ advanced (benchmarking/tuning):
                          (pin defaults on for Windows amd64 up to 64 logical CPUs;
                           --pin=false disables)
   --pair                 2 nonces/thread with a 2-way batched final hash
-                         (default on arm64 with SHA2; --pair=false disables)
+                         (default wherever the kernel exists: amd64 with
+                          SHA-NI, arm64 with SHA2; --pair=false disables)
   --sa v114|sais         suffix-array backend (default v114)
   --dry-run / --debug / --cpuprofile <file>
 `, defaultDaemon)
