@@ -1378,10 +1378,14 @@ ratio.
 
 The speedup is 1.29x at the median of 201 paired reps, IQR 1.25x-1.29x, and
 1.29x at the median of every run of the block. The inherited claim survives
-contact with an instrument. The derived column scales by a core:TSC ratio measured at
-2.0637 on this host (2.0164-2.0637 across the session; TSC 2.3008 GHz, implied
-core 4.75 GHz) and carries that ratio's uncertainty; it is corroboration, and
-nothing here depends on it.
+contact with an instrument. The derived column scales by a core:TSC ratio
+measured at 2.0637 on this host (2.0164-2.0637 across the session; TSC 2.3008
+GHz, implied core 4.75 GHz). That 2.35% spread is about +/-3 cycles at this
+magnitude, so the derived figures are good to roughly +/-3 and their decimal
+place is spurious; they are corroboration, and nothing here depends on them.
+The probe also does not lock its goroutine to a thread or read TSC_AUX, so a
+migration mid-sample would go undetected -- another reason only the paired
+ratio is load-bearing.
 
 The gap has a shape that needs no ratio at all. A lane on its own costs 67.4
 ticks/block; adding the second lane costs 37.1 ticks more. **The second lane
@@ -1390,11 +1394,14 @@ sharing one execution unit's latency shadow should have cost close to nothing** 
 the block-pair sits at 1.55x the perfect-overlap ideal of 67.4 ticks.
 
 One wrong-by-design probe then tested the leading explanation for that.
-`probeBlocks2NoSched` is `sha256Blocks2NI` with every `SHA256MSG1`,
-`SHA256MSG2` and schedule `PALIGNR` deleted: same round chain, same `X0`
-staging, same loop structure, stale message words and so a deliberately wrong
-digest, which the test asserts lane by lane, so a copy that failed to remove
-the thing it was pricing fails loudly instead of reporting a quiet null.
+`probeBlocks2NoSched` is `sha256Blocks2NI` with the whole message schedule
+deleted -- 24 each of `SHA256MSG1`, `SHA256MSG2`, `PALIGNR`, and the
+`MOVO`/`PADDD` pair that stages the schedule temp -- leaving the same round
+chain, the same `X0` staging, the same loop structure, stale message words and
+so a deliberately wrong digest, which the test asserts lane by lane, so a copy
+that failed to remove the thing it was pricing fails loudly instead of
+reporting a quiet null. Every other mnemonic count matches the production
+kernel, and both carry 64 `SHA256RNDS2`.
 **The entire message schedule is 5.0% of 2-way kernel time** (IQR 4.9%-5.2%,
 and the median came back at 5.0-5.1% in every run of the block, against a
 threshold ten points away). That
@@ -1410,17 +1417,25 @@ so **the `X0`-funnel probe was never built and no kernel change was written**.
 There is no candidate arm in this campaign and no end-to-end leg; this section
 is the closure, not a preamble to one.
 
-**Verdict: the 2-way kernel is at its architectural ceiling on this host, and
-the missing 0.7x is not reachable from the code.** With the schedule at 5.0%,
-there is almost nothing left around the `SHA256RNDS2` chain to hide. The
-derived cycles say the same from the other side: 1-way runs at ~139 core
-cyc/block against a pure dependency-chain floor of 32 serial `SHA256RNDS2` x
-~4 cyc = 128, i.e. within roughly a tenth of the floor, so its non-round uops
-are already in the shadow. Interleaving a second lane cannot buy back latency
-that was never being lost; it can only buy issue slots on the one SHA unit, and
-1.29x is what that unit gives. Every lever this diagnosis set out to pull --
-schedule reordering, `X0` staging, `PALIGNR` placement -- aims at the 5% that
-is already hidden.
+**Verdict: the message schedule is not where the missing 0.7x went.** At 5.0%
+of kernel time it is far too small to be the gap, so schedule reordering and
+`PALIGNR` placement are both aiming at the wrong 5%. The derived cycles point
+the same way: 1-way runs at ~139 core cyc/block (+/-3, see the ratio caveat)
+against a dependency-chain floor of 32 serial `SHA256RNDS2`, which puts it
+close to that floor if the per-instruction latency really is ~4 cycles on
+Raptor Cove.
+
+Two limits on how far that verdict reaches, stated because this campaign
+stopped by rule rather than by exhaustion. The 4-cycle figure is an
+assumption, not something measured here: LLVM's Alder Lake P-core model uses 6
+for `SHA256RNDS2` while a published Raptor Cove microbenchmark reports ~4. At
+6 the floor would be 192 and the 1-way measurement would sit *below* it, which
+would mean the chain is not the binding constraint at all and this framing
+needs redoing. Separately, the pre-registered rule stopped the campaign before
+the `X0` staging was ever priced, so instruction staging, port contention and
+lane organisation remain unmeasured. What is closed is the schedule-side
+surface; calling the whole kernel architecturally maxed out would claim more
+than two probes can support.
 
 Scope of the closure: it retires schedule-side and `X0`-side rewrites of this
 kernel on Raptor Cove. It says nothing about hashing fewer SHA-256 blocks, and
@@ -1449,16 +1464,19 @@ the shuffle mask).
   [+3.302%, +4.241%] at 20T and +1.4% at 1T. The old opt-in rationale (a
   doubled working set) stopped being true when the two lanes started sharing one
   v114 scratch.
-- *Can the 2-way SHA-NI kernel be made to interleave better than 1.29x?* No, not
-  from the code, on Raptor Cove. Measured 2026-08-21 with a test-only RDTSCP
+- *Is the 2-way SHA-NI kernel's message schedule worth optimising?* No, and the
+  schedule-side surface is closed. Measured 2026-08-21 with a test-only RDTSCP
   probe: 1-way 67.4 TSC ticks/block, 2-way 52.3 (104.5 per block-pair) = 1.29x,
   IQR 1.25-1.29 and 1.29x at the median of every run. The whole message
   schedule is 5.0% of kernel time (wrong-by-design probe with every
   SHA256MSG1/MSG2 and schedule PALIGNR deleted), against a pre-registered
   15% threshold for continuing, so the X0-funnel probe and the kernel change
   were never built. 1-way already runs within ~8% of the pure dependency-chain
-  floor (32 serial SHA256RNDS2 x ~4 cyc), so there is no latency left to hide
-  and the second lane buys issue slots only. Reopen only on AMD, where the
+  floor (32 serial SHA256RNDS2 x ~4 cyc -- an assumed latency this campaign did
+  not measure; LLVM's Alder Lake model says 6). What was NOT shown is that the
+  kernel as a whole is maxed out: the X0-staging probe was never built, because
+  the same pre-registered rule that closed the schedule stopped the campaign.
+  Reopen for the X0 funnel with a measured RNDS2 latency, or on AMD, where the
   "~2x" figure originated and the SHA unit's throughput differs.
 - *Is there anything left in the suffix-array / radix / SMT literature?* Not for
   this workload at this size. A source-restricted arXiv + go.dev pass produced

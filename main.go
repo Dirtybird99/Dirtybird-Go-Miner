@@ -70,7 +70,8 @@ func validSAName(name string) bool { return name == "v114" || name == "sais" }
 // interleaved kernel exists — arm64 with the SHA2 extensions and amd64 with
 // SHA-NI. It was opt-in on amd64 while the two lanes each carried their own
 // v114 scratch; they now run sequentially through one (see Hasher.HashPair),
-// so the only thing x2 changes is that both lanes' final SHA-256 goes through
+// so the dominant ~2.8 MB workspace is no longer doubled — a second
+// ScratchData is still allocated — and both lanes' final SHA-256 goes through
 // the 2-way block. Measured on an i7-13700HX, 8-leg drift-adjusted:
 // +3.771% [+3.302%, +4.241%] at 20 threads, +1.4% at one. An explicit
 // -pair=false always wins over the default.

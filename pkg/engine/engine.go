@@ -55,9 +55,10 @@ var ErrInvalidConfig = errors.New("engine: endpoint and wallet are required")
 
 // DefaultPair mirrors the CLI default: 2-way batched final hashing on
 // wherever the interleaved kernel exists — arm64 with the SHA2 extensions and
-// amd64 with SHA-NI. The two lanes share one v114 scratch and run
-// sequentially, so pairing costs no extra working set; all it changes is that
-// both lanes' final SHA-256 goes through the interleaved block.
+// amd64 with SHA-NI. The lanes run sequentially and share the ~2.8 MB v114
+// workspace, so pairing does not double the dominant working set; it does add
+// a second ScratchData (~0.5 MB of per-lane state) and batches both lanes'
+// final SHA-256 through the interleaved block.
 func DefaultPair() bool {
 	return astrobwt.PairHashSupported()
 }

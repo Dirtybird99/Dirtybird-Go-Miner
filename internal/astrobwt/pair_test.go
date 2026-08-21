@@ -12,9 +12,11 @@ import (
 // sha256Sum256Pair falls back to crypto/sha256 when the batched kernel is
 // unavailable, so on such a host the pair suite compares crypto/sha256
 // against itself, passes, and proves nothing about the kernel. This test
-// makes that state impossible to mistake for coverage: it skips with a loud
-// message instead of quietly passing, and the arm64 CI leg greps the
-// discriminator this logs.
+// makes that state impossible to mistake for coverage: it skips with an
+// explicit message instead of quietly passing. Note a plain `go test` prints
+// neither the skip reason nor the log line without -v; the arm64 CI leg gets
+// its `pairHashAvailable=true` assertion from TestPairDifferentialVsSingle,
+// which it runs with -test.v, and no amd64 leg asserts it at all.
 func TestPairKernelIsLiveOrSaysSo(t *testing.T) {
 	t.Logf("pairHashPossible=%v pairHashAvailable=%v", pairHashPossible, pairHashAvailable())
 	if !pairHashAvailable() {

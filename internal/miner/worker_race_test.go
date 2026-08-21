@@ -137,9 +137,9 @@ func TestWorkerStopsWhileJobIsInvalid(t *testing.T) {
 
 // TestWorkerSubmitsVerifiableShares is the only place anything checks that a
 // submitted blob is the blob the worker actually hashed. Every other gate
-// stops at the hash function: the million-hash differential and --selftest
-// call Hash, never HashPair, and the churn test above asserts only that
-// shares arrive with a stamped epoch. That left the worker's two-lane branch
+// stopped at the hash function: the churn test above asserts only that shares
+// arrive with a stamped epoch, and until the gates were widened neither the
+// million-hash differential nor --selftest called HashPair at all. That left the worker's two-lane branch
 // - the one every amd64 build takes since pairing became the default - with
 // no correctness gate at all, so a lane mix-up would surface as pool-side
 // rejects rather than as a red test.
@@ -160,8 +160,10 @@ func TestWorkerSubmitsVerifiableShares(t *testing.T) {
 	}{{"x1", false}, {"x2", true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			// 256 is low enough to yield shares in a second and high enough
-			// that both lanes winning the same iteration is ~1/65536, so a
-			// lane mix-up cannot hide behind a double win.
+			// that both lanes win the same iteration only ~1/65536 of the
+			// time. A cross-up can still hide behind an individual double
+			// win (conditional probability ~1/256), so the assertion rests on
+			// the run producing many shares, not on any single one.
 			const difficulty = 256
 			const tid = 7
 
