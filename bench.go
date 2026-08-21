@@ -124,12 +124,8 @@ func pipelineName(pair bool) string {
 
 // runBench sweeps thread counts and prints a derohe-style table.
 func runBench(maxThreads int, pin bool, backend astrobwt.Backend, pair bool) int {
-	var pinOrder []int
-	if pin {
-		pinOrder = miner.PinOrder()
-	}
-	fmt.Printf("go-miner %s bench, %d logical CPUs, pin=%v, sa=%s, pipeline=%s\n",
-		version, runtime.NumCPU(), pin, backendName(backend), pipelineName(pair))
+	fmt.Printf("go-miner %s bench, %d logical CPUs, pin=%v, sa=%s, avx512=%v, pipeline=%s\n",
+		version, runtime.NumCPU(), pin, backendName(backend), astrobwt.AVX512MiningPath, pipelineName(pair))
 	fmt.Printf("%8s %12s %14s %14s\n", "Threads", "Total H/s", "Per-thread", "Time/PoW")
 
 	counts := []int{1, 2, 4, 8, 12, 16, 20, 23, 24}
@@ -139,6 +135,10 @@ func runBench(maxThreads int, pin bool, backend astrobwt.Backend, pair bool) int
 			continue
 		}
 		seen[tc] = true
+		var pinOrder []int
+		if pin {
+			pinOrder = miner.PinOrder(tc)
+		}
 		_, _ = hashFor(tc, time.Second, pinOrder, backend, pair) // warmup
 		const window = 5 * time.Second
 		n, elapsed := hashFor(tc, window, pinOrder, backend, pair)
@@ -193,10 +193,11 @@ func runSustained(threads, secs int, pin bool, backend astrobwt.Backend, pair bo
 	}
 	var pinOrder []int
 	if pin {
-		pinOrder = miner.PinOrder()
+		pinOrder = miner.PinOrder(threads)
 	}
-	fmt.Printf("go-miner %s sustained bench: %d threads, %ds, pin=%v, sa=%s, pipeline=%s\n",
-		version, threads, secs, pin, backendName(backend), pipelineName(pair))
+	pin = pin && pinOrder != nil
+	fmt.Printf("go-miner %s sustained bench: %d threads, %ds, pin=%v, sa=%s, avx512=%v, pipeline=%s\n",
+		version, threads, secs, pin, backendName(backend), astrobwt.AVX512MiningPath, pipelineName(pair))
 	window := time.Duration(secs) * time.Second
 	r := startHashRun(threads, pinOrder, backend, pair)
 	start := r.start
@@ -271,7 +272,7 @@ func runStatBench(cons *console.Console, threads, secs int, o *options) int {
 	}
 	var pinOrder []int
 	if o.pin {
-		pinOrder = miner.PinOrder()
+		pinOrder = miner.PinOrder(threads)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*time.Second)
 	defer cancel()

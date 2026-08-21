@@ -109,9 +109,12 @@ performance methodology and research notes live in [BENCHMARKING.md](BENCHMARKIN
 and [PERF_RESEARCH.md](PERF_RESEARCH.md).
 
 On Windows amd64 systems with up to 64 logical CPUs, topology-aware
-P-core-first pinning is on by default; `--pin=false` opts out. Larger Windows
-systems and other platforms stay unpinned unless requested. `--high` remains
-opt-in. The x2 `--pair` path is on by default wherever the 2-way kernel exists
+P-core-first pinning is on by default; `--pin=false` opts out. Linux stays
+unpinned by default, but `--pin` now pins one allowed CPU from every physical
+core before SMT siblings and respects HiveOS/container CPU masks. Unsupported
+requests fail closed to an unpinned run; missing topology falls back to the
+allowed CPU order. `--high` remains opt-in. The x2 `--pair` path is on by
+default wherever the 2-way kernel exists
 (amd64 with SHA-NI, arm64 with SHA2); `--pair=false` opts out.
 
 ## Build from source
@@ -127,7 +130,10 @@ mining workload) are the max-performance defaults on x86-64; both are optional.
 Cross-compile with the usual `GOOS`/`GOARCH`, e.g.
 `GOOS=linux GOARCH=arm64 go build .` — non-x86 targets use the portable
 fallbacks automatically. `scripts/release.sh vX.Y.Z` reproduces the full
-release asset set.
+release asset set. The `GOAMD64=v4` AVX-512 classifier remains a diagnostic
+candidate, not a release default; use the AMD workflow in
+[BENCHMARKING.md](BENCHMARKING.md#amd-linux--hiveos-scaling) to validate it on
+native hardware.
 
 ## Correctness
 

@@ -110,8 +110,10 @@ type Config struct {
 	// pointer takes DefaultPair(); a non-nil one is honored either way, so a
 	// host can turn pairing off on arm64 the way the CLI's -pair=false does.
 	Pair *bool
-	// Pin enables P-core-first thread pinning where supported (Windows amd64
-	// <= 64 logical CPUs in v1; a no-op elsewhere).
+	// Pin enables physical-core-first thread pinning on supported Windows and
+	// Linux hosts. Pinning remains opt-in and is all-or-nothing for the worker
+	// set. Linux uses x/sys's fixed mask for CPU IDs below 1024; systems needing
+	// a larger mask safely run unpinned. This is independent of MaxThreads.
 	Pin bool
 	// Backend selects the suffix-array implementation; "" or "v114" selects
 	// the v1.14 descriptor SA, "sais" the reference SAIS. DefaultBackendName
@@ -237,7 +239,7 @@ func Start(ctx context.Context, cfg Config) (*Engine, error) {
 
 	var pinOrder []int
 	if cfg.Pin {
-		pinOrder = miner.PinOrder()
+		pinOrder = miner.PinOrder(cfg.Threads)
 	}
 	pair := e.pair() // resolved here: cfg.Pair points at the caller's memory
 	for t := 0; t < cfg.Threads; t++ {

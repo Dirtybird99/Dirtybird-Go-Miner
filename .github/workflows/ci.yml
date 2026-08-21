@@ -101,6 +101,9 @@ jobs:
       - name: Bench analyzer selftest
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/analyze-thue-morse.py --selftest
+      - name: AMD/Linux harness selftest
+        if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/bench-linux-scaling.sh --self-test
       - name: Race
         run: go test -race -count=1 -timeout=30m ./...
       - name: Shell hygiene

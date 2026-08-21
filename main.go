@@ -79,10 +79,8 @@ func defaultPairMode() bool {
 	return astrobwt.PairHashSupported()
 }
 
-// defaultPinModeFor: pinning defaults on only where the affinity code can
-// pin every thread. Above 64 logical CPUs Windows splits processor groups
-// and pinCurrentThread bails per-thread, which would leave a PARTIAL pin —
-// worse than none.
+// defaultPinModeFor: pinning defaults on only where one Windows processor
+// group can represent every worker. Larger systems stay opt-in.
 func defaultPinModeFor(goos, goarch string, ncpu int) bool {
 	return goos == "windows" && goarch == "amd64" && ncpu <= 64
 }
@@ -308,8 +306,8 @@ func run() int {
 	} else {
 		cons.Logf("INFO", "Features: avx2 %s | avx512 %s | sha %s",
 			yesNo(cpuid.CPU.Supports(cpuid.AVX2)), yesNo(cpuid.CPU.Supports(cpuid.AVX512F)), yesNo(cpuid.CPU.Supports(cpuid.SHA)))
-		cons.Logf("INFO", "Fast path: SHA-NI build %s; AVX512 mining path No",
-			yesNo(cpuid.CPU.Supports(cpuid.SHA, cpuid.SSSE3, cpuid.SSE4)))
+		cons.Logf("INFO", "Fast path: SHA-NI build %s; AVX512 mining path %s",
+			yesNo(cpuid.CPU.Supports(cpuid.SHA, cpuid.SSSE3, cpuid.SSE4)), yesNo(astrobwt.AVX512MiningPath))
 	}
 	fmt.Fprintln(os.Stderr)
 
@@ -386,7 +384,7 @@ func run() int {
 	if !o.dryRun {
 		var pinOrder []int
 		if o.pin {
-			pinOrder = miner.PinOrder()
+			pinOrder = miner.PinOrder(o.threads)
 			if o.debugFlag {
 				cons.Logf("DEBUG", "pin order: %v", pinOrder)
 			}
