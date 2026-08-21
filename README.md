@@ -86,7 +86,7 @@ upgrade, `--uninstall` to remove.
 
 Notes for phones: `-pin`/`-high` have no effect on Android — use the thread
 count to balance hashrate, temperature, and battery. The 2-way batched final
-hash is on by default on arm64 (`--pair=false` disables it). Mining on
+hash is on by default (`--pair=false` disables it). Mining on
 battery drains it fast; keep the device plugged in and ventilated.
 
 ## Usage
@@ -111,8 +111,8 @@ and [PERF_RESEARCH.md](PERF_RESEARCH.md).
 On Windows amd64 systems with up to 64 logical CPUs, topology-aware
 P-core-first pinning is on by default; `--pin=false` opts out. Larger Windows
 systems and other platforms stay unpinned unless requested. `--high` remains
-opt-in. The x2 `--pair` path remains opt-in on amd64 and defaults on only where
-the ARM SHA2 path has a measured win.
+opt-in. The x2 `--pair` path is on by default wherever the 2-way kernel exists
+(amd64 with SHA-NI, arm64 with SHA2); `--pair=false` opts out.
 
 ## Build from source
 

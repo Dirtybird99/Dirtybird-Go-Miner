@@ -66,13 +66,16 @@ func (o *options) backend() astrobwt.Backend {
 
 func validSAName(name string) bool { return name == "v114" || name == "sais" }
 
-// defaultPairMode: the 2-way batched final hash defaults on for arm64 with
-// the SHA2 extensions (family parity with the Rust miner — the interleaved
-// kernel wins on every ARM core measured) and stays opt-in on amd64, where
-// it costs ~1% at high thread counts from the doubled working set. An
-// explicit -pair=false always wins over the default.
+// defaultPairMode: the 2-way batched final hash defaults on wherever the
+// interleaved kernel exists — arm64 with the SHA2 extensions and amd64 with
+// SHA-NI. It was opt-in on amd64 while the two lanes each carried their own
+// v114 scratch; they now run sequentially through one (see Hasher.HashPair),
+// so the only thing x2 changes is that both lanes' final SHA-256 goes through
+// the 2-way block. Measured on an i7-13700HX, 8-leg drift-adjusted:
+// +3.771% [+3.302%, +4.241%] at 20 threads, +1.4% at one. An explicit
+// -pair=false always wins over the default.
 func defaultPairMode() bool {
-	return runtime.GOARCH == "arm64" && astrobwt.PairHashSupported()
+	return astrobwt.PairHashSupported()
 }
 
 // defaultPinModeFor: pinning defaults on only where the affinity code can
